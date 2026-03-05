@@ -55,9 +55,20 @@ def _to_download_since(iso_ts):
     return dt.astimezone(timezone.utc).strftime("%Y/%m/%d %H:%M")
 
 
+def _err_text(err: Exception) -> str:
+    msg = str(err).strip()
+    return msg or repr(err)
+
+
 def _needs_2fa(err: Exception) -> bool:
-    msg = str(err).lower()
-    return "2fa" in msg or "auth key" in msg or "verification" in msg
+    msg = _err_text(err).lower()
+    return "2fa" in msg or "twofa" in msg or "auth key" in msg or "verification" in msg
+
+
+def _ensure_blink_ready(blink):
+    base_url = getattr(blink, "base_url", None) or getattr(blink, "_base_url", None)
+    if base_url is None:
+        raise RuntimeError("Cannot setup Blink platform (base_url missing)")
 
 
 def _connect(db_path):
@@ -142,6 +153,7 @@ async def _start_blink(conn, auth_file):
 
     try:
         await blink.start()
+        _ensure_blink_ready(blink)
         await blink.refresh(force=True)
         await blink.save(auth_file)
         _update(
@@ -176,9 +188,9 @@ async def _start_blink(conn, auth_file):
             needs_2fa=0,
             locked_error=1,
             paused_fetch=1,
-            last_error=str(exc),
+            last_error=_err_text(exc),
         )
-        return None, str(exc)
+        return None, _err_text(exc)
 
 
 async def _main():

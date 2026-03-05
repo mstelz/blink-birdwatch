@@ -117,6 +117,12 @@ def _needs_2fa(err: Exception) -> bool:
     )
 
 
+def _ensure_blink_ready(blink):
+    base_url = getattr(blink, "base_url", None) or getattr(blink, "_base_url", None)
+    if base_url is None:
+        raise RuntimeError("Cannot setup Blink platform (base_url missing)")
+
+
 async def _new_blink(session, auth):
     try:
         return Blink(session=session, auth=auth)
@@ -246,10 +252,8 @@ async def _attempt_auth(conn, twofa_code=""):
                 )
                 return {"ok": False, "error": _err_text(exc)}
 
-        try:
-            await blink.refresh(force=True)
-        except Exception:
-            pass
+        _ensure_blink_ready(blink)
+        await blink.refresh(force=True)
 
         try:
             await blink.save(_auth_file())
@@ -399,10 +403,8 @@ async def _interactive_login(conn):
                 _print(payload)
                 return
 
-        try:
-            await blink.refresh(force=True)
-        except Exception:
-            pass
+        _ensure_blink_ready(blink)
+        await blink.refresh(force=True)
 
         try:
             await blink.save(_auth_file())
