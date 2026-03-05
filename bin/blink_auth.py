@@ -7,11 +7,13 @@ Commands:
 """
 
 import asyncio
+import getpass
 import json
 import os
 import sys
 
 import aiohttp
+from blinkpy.auth import Auth
 from blinkpy.blinkpy import Blink
 
 
@@ -30,6 +32,35 @@ def _load_json(path, default):
 def _err_text(err: Exception) -> str:
     msg = str(err).strip()
     return msg or repr(err)
+
+
+def _needs_2fa(err: Exception) -> bool:
+    msg = _err_text(err).lower()
+    return "2fa" in msg or "twofa" in msg or "verification" in msg or "auth key" in msg
+
+
+async def _submit_2fa(auth, blink, code):
+    # API varies across blinkpy versions.
+    for fn in (
+        getattr(auth, "send_auth_key", None),
+        getattr(getattr(blink, "auth", None), "send_auth_key", None),
+        getattr(blink, "send_auth_key", None),
+    ):
+        if not callable(fn):
+            continue
+        try:
+            await fn(blink, code)
+            return
+        except TypeError:
+            pass
+        except Exception:
+            continue
+        try:
+            await fn(code)
+            return
+        except Exception:
+            continue
+    raise RuntimeError("could not submit 2FA code with this blinkpy build")
 
 
 async def _cleanup(blink, session, auth=None):
@@ -73,14 +104,47 @@ def _status_payload():
 
 async def _interactive_login():
     print("Blink interactive login")
+    username = input("Blink username/email: ").strip()
+    password = getpass.getpass("Blink password: ").strip()
+    if not username or not password:
+        print(json.dumps({"ok": False, "error": "username and password are required"}))
+        return 1
 
     auth_file = _auth_file()
+    creds = _load_json(auth_file, {})
+    creds["username"] = username
+    creds["password"] = password
+
+    auth = Auth(creds, no_prompt=True)
     session = aiohttp.ClientSession()
     blink = Blink(session=session)
+    if hasattr(blink, "auth"):
+        blink.auth = auth
+    elif hasattr(blink, "_auth"):
+        blink._auth = auth
 
     try:
-        # Use blinkpy-native interactive login path (prompts for credentials + MFA as needed).
         await blink.start()
+    except Exception as exc:
+        if not _needs_2fa(exc):
+            print(json.dumps({"ok": False, "error": _err_text(exc)}))
+            return 1
+
+        try:
+            if hasattr(blink, "prompt_2fa"):
+                await blink.prompt_2fa()
+            else:
+                code = input("Enter the two-factor authentication code: ").strip()
+                if not code:
+                    raise RuntimeError("2FA code is required")
+                await _submit_2fa(auth, blink, code)
+                if hasattr(blink, "setup_post_verify"):
+                    await blink.setup_post_verify()
+        except Exception as twofa_exc:
+            print(json.dumps({"ok": False, "error": _err_text(twofa_exc)}))
+            return 1
+
+    try:
         if hasattr(blink, "refresh"):
             await blink.refresh(force=True)
         await blink.save(auth_file)
@@ -90,7 +154,7 @@ async def _interactive_login():
         print(json.dumps({"ok": False, "error": _err_text(exc)}))
         return 1
     finally:
-        await _cleanup(blink, session)
+        await _cleanup(blink, session, auth)
 
 
 async def _main():
