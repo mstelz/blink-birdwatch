@@ -14,6 +14,41 @@ const app = express();
 app.use(express.json());
 
 const exec = promisify(execCb);
+let authLastError = '';
+
+async function runJsonCommand(command) {
+  const { stdout, stderr } = await exec(command, { maxBuffer: 10 * 1024 * 1024 });
+  const text = (stdout || '').trim();
+  if (!text) throw new Error(`empty output${stderr ? `; stderr: ${stderr.trim()}` : ''}`);
+  return JSON.parse(text);
+}
+
+async function getAuthStatus() {
+  try {
+    const data = await runJsonCommand('python3 /app/bin/blink_auth.py status');
+    if (!data.ok && data.error) authLastError = data.error;
+    return { ...data, lastError: authLastError || undefined };
+  } catch (err) {
+    authLastError = err.message;
+    return {
+      ok: false,
+      authenticated: false,
+      needs2fa: false,
+      hasCredentials: Boolean(process.env.BLINK_USERNAME && process.env.BLINK_PASSWORD),
+      authFile: cfg.blinkAuthFile,
+      lastError: authLastError
+    };
+  }
+}
+
+function requireBridgeToken(req, res, next) {
+  if (!cfg.bridgeAuthToken) return next();
+  const token = req.get('x-bridge-token');
+  if (token !== cfg.bridgeAuthToken) {
+    return res.status(401).json({ ok: false, error: 'unauthorized: missing/invalid X-Bridge-Token' });
+  }
+  return next();
+}
 
 const MAX_SEEN_IDS = 10_000;
 const workDir = path.resolve(process.cwd(), cfg.workDir);
@@ -146,6 +181,136 @@ app.get('/health', (_req, res) => {
     birdnetGoInputDir: cfg.birdnetGoInputDir,
     seenEvents: seenMotionIds.size
   });
+});
+
+app.get('/auth/status', async (_req, res) => {
+  const status = await getAuthStatus();
+  res.json(status);
+});
+
+app.post('/auth/login', requireBridgeToken, (req, res) => {
+  const username = String(req.body?.username || '').trim();
+  const password = String(req.body?.password || '').trim();
+  if (!username || !password) {
+    return res.status(400).json({ ok: false, error: 'username and password are required' });
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(cfg.blinkAuthFile), { recursive: true });
+    fs.writeFileSync(cfg.blinkAuthFile, `${JSON.stringify({ username, password }, null, 2)}\n`, 'utf8');
+    authLastError = '';
+    return res.json({ ok: true, authFile: cfg.blinkAuthFile });
+  } catch (err) {
+    authLastError = err.message;
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/auth/2fa', requireBridgeToken, async (req, res) => {
+  const code = String(req.body?.code || '').trim();
+  if (!code) return res.status(400).json({ ok: false, error: 'code is required' });
+
+  try {
+    const data = await runJsonCommand(`python3 /app/bin/blink_auth.py verify-2fa ${JSON.stringify(code)}`);
+    if (!data.ok && data.error) authLastError = data.error;
+    return res.status(data.ok ? 200 : 400).json({ ...data, lastError: authLastError || undefined });
+  } catch (err) {
+    authLastError = err.message;
+    return res.status(500).json({ ok: false, error: err.message, lastError: authLastError });
+  }
+});
+
+app.get('/auth', (_req, res) => {
+  res.type('html').send(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blink Bridge Auth</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 680px; margin: 2rem auto; padding: 0 1rem; }
+    .row { margin: 0.75rem 0; }
+    input { padding: 0.5rem; width: 100%; box-sizing: border-box; }
+    button { padding: 0.55rem 0.8rem; }
+    code { background: #f3f3f3; padding: 0.15rem 0.3rem; border-radius: 4px; }
+    .ok { color: #0b7a0b; }
+    .bad { color: #b42318; }
+    .muted { color: #666; font-size: 0.92rem; }
+  </style>
+</head>
+<body>
+  <h1>Blink Bridge Auth Helper</h1>
+  <div class="row">Status: <strong id="status">loading...</strong></div>
+  <div class="row muted" id="meta"></div>
+
+  <h3>Set Credentials (optional)</h3>
+  <div class="row"><input id="username" placeholder="Blink username/email" /></div>
+  <div class="row"><input id="password" placeholder="Blink password" type="password" /></div>
+  <div class="row"><button id="saveLogin">Save Login</button></div>
+
+  <h3>Submit 2FA Code</h3>
+  <div class="row"><input id="code" placeholder="123456" /></div>
+  <div class="row"><button id="submit2fa">Verify 2FA</button></div>
+
+  <div class="row"><button id="refresh">Refresh status</button></div>
+  <pre id="out" class="muted"></pre>
+
+<script>
+const out = document.getElementById('out');
+const statusEl = document.getElementById('status');
+const metaEl = document.getElementById('meta');
+
+function tokenHeader() {
+  const t = localStorage.getItem('bridgeToken') || '';
+  return t ? { 'X-Bridge-Token': t } : {};
+}
+
+async function loadStatus() {
+  const r = await fetch('/auth/status');
+  const j = await r.json();
+  const txt = j.authenticated ? 'authenticated' : (j.needs2fa ? 'needs 2FA' : 'not authenticated');
+  statusEl.textContent = txt;
+  statusEl.className = j.authenticated ? 'ok' : 'bad';
+  metaEl.textContent = 'authFile: ' + (j.authFile || 'n/a') + ' | hasCredentials: ' + Boolean(j.hasCredentials);
+  if (j.lastError) out.textContent = 'lastError: ' + j.lastError;
+}
+
+document.getElementById('refresh').onclick = loadStatus;
+
+document.getElementById('saveLogin').onclick = async () => {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value.trim();
+  const r = await fetch('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...tokenHeader() },
+    body: JSON.stringify({ username, password })
+  });
+  out.textContent = JSON.stringify(await r.json(), null, 2);
+  await loadStatus();
+};
+
+document.getElementById('submit2fa').onclick = async () => {
+  const code = document.getElementById('code').value.trim();
+  const r = await fetch('/auth/2fa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...tokenHeader() },
+    body: JSON.stringify({ code })
+  });
+  out.textContent = JSON.stringify(await r.json(), null, 2);
+  await loadStatus();
+};
+
+(() => {
+  const existing = localStorage.getItem('bridgeToken');
+  if (!existing) {
+    const t = prompt('Optional: BRIDGE_AUTH_TOKEN (leave empty if not configured)');
+    if (t) localStorage.setItem('bridgeToken', t.trim());
+  }
+  loadStatus();
+})();
+</script>
+</body>
+</html>`);
 });
 
 app.post('/bridge/blink/event', async (req, res) => {

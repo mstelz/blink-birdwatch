@@ -63,7 +63,16 @@ docker compose up -d
 
 `blink_fetch.py` caches Blink session tokens in `BLINK_AUTH_FILE` (default `/app/config/blink-auth.json`).
 
-If your Blink account requires MFA (common), do this once:
+You can do MFA either via env var or the built-in auth helper UI/API.
+
+**Recommended (UI):**
+
+1. Open `http://localhost:${BRIDGE_PORT:-8787}/auth`
+2. (Optional) Save credentials with the login form.
+3. Submit Blink MFA code in the 2FA form.
+4. Confirm status shows authenticated.
+
+**Legacy env var flow:**
 
 1. Set `BLINK_2FA_CODE` in `.env` to the email code Blink sends.
 2. Restart container: `docker compose restart blink-bridge`
@@ -98,6 +107,7 @@ All settings are env vars (see `.env.example`).
 | `BLINK_FETCH_STATE_FILE` | `/app/config/blink-fetch-state.json` | Dedupe state for emitted events |
 | `BLINK_CAMERA_NAMES` | _(empty)_ | Optional comma-separated camera names to include |
 | `BLINK_FETCH_MAX_EVENTS` | `25` | Max events emitted per fetch run |
+| `BRIDGE_AUTH_TOKEN` | _(empty)_ | Optional token required for `POST /auth/login` + `POST /auth/2fa` via `X-Bridge-Token` |
 | `BRIDGE_URL` | `http://127.0.0.1:8787/bridge/blink/event` | Used by standalone `src/blinkPoller.js` mode |
 
 ### Compose host mapping / BirdNET-Go companion
@@ -149,32 +159,36 @@ curl -X POST http://localhost:8787/bridge/blink/event \
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | `GET` | Returns status and active config summary |
+| `/auth` | `GET` | Minimal auth helper UI for Blink login + 2FA |
+| `/auth/status` | `GET` | Returns auth status (`authenticated`, `needs2fa`, `hasCredentials`, `authFile`) |
+| `/auth/login` | `POST` | Saves Blink credentials to `BLINK_AUTH_FILE` (`{username,password}`) |
+| `/auth/2fa` | `POST` | Verifies MFA code and persists authenticated session (`{code}`) |
 | `/bridge/blink/event` | `POST` | Appends + processes one Blink event |
+
+If `BRIDGE_AUTH_TOKEN` is set, include header `X-Bridge-Token` on `POST /auth/login` and `POST /auth/2fa`.
+
+### Auth helper API examples
+
+```bash
+# status
+curl -s http://localhost:8787/auth/status | jq .
+
+# save credentials
+curl -s -X POST http://localhost:8787/auth/login \
+  -H 'Content-Type: application/json' \
+  -H 'X-Bridge-Token: YOUR_TOKEN_IF_SET' \
+  -d '{"username":"you@example.com","password":"your_password"}' | jq .
+
+# submit 2FA code
+curl -s -X POST http://localhost:8787/auth/2fa \
+  -H 'Content-Type: application/json' \
+  -H 'X-Bridge-Token: YOUR_TOKEN_IF_SET' \
+  -d '{"code":"123456"}' | jq .
+```
 
 ## Unraid
 
-You have two deployment options:
-
-### Option A: Unraid template (single bridge container)
-
-- Install BirdNET-Go separately (`ghcr.io/tphakala/birdnet-go`).
-- Use included `unraid-template.xml` for `blink-bridge`.
-- Mount these paths:
-  - `/app/config`
-  - `/app/work`
-  - `/app/output`
-- Set Blink auth variables in the template:
-  - `BLINK_USERNAME`
-  - `BLINK_PASSWORD`
-  - `BLINK_FETCH_COMMAND=python3 /app/bin/blink_fetch.py`
-
-For first-time MFA, set `BLINK_2FA_CODE`, start container once, then clear it after successful auth.
-
-**Important:** `/app/output` must map to the same host directory BirdNET-Go is watching.
-
-### Option B: Compose stack on Unraid (UI + worker + bridge)
-
-Use `docker-compose.unraid.yml` to run everything together:
+Use `docker-compose.unraid.yml` to run everything together (UI + worker + bridge):
 
 1. Copy `unraid.env.example` to `.env` and set host share paths.
 2. Start stack:
@@ -187,7 +201,13 @@ This stack runs:
 
 - `birdnet-go-ui` (dashboard on `BIRDNET_GO_PORT`)
 - `birdnet-go-worker` (`birdnet-go directory /blink-processed --watch --recursive --output /birdnet-output`)
-- `blink-bridge` (Blink event + WAV extraction)
+- `blink-bridge` (Blink event + WAV extraction + auth helper UI/API)
+
+Useful URLs after startup:
+
+- Bridge health: `http://<unraid-ip>:${BRIDGE_PORT:-8787}/health`
+- Bridge auth helper: `http://<unraid-ip>:${BRIDGE_PORT:-8787}/auth`
+- BirdNET UI: `http://<unraid-ip>:${BIRDNET_GO_PORT:-8080}`
 
 Check status/logs:
 
