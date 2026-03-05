@@ -93,15 +93,6 @@ docker exec -it blink-bridge blink status
 docker logs -f blink-bridge
 ```
 
-### Migration note (from env-based auth)
-
-Older versions relied on `BLINK_USERNAME`, `BLINK_PASSWORD`, and `BLINK_2FA_CODE` env-driven login attempts.
-This has been removed to prevent repeated failed retries/lockouts.
-
-- Existing auth/session files are still used (`BLINK_AUTH_FILE`).
-- Configure `BLINK_DB_FILE` and use `blink login` for credentials + reauth.
-- `BLINK_2FA_CODE` env flow is deprecated/disabled.
-
 ## Configuration
 
 All settings are env vars (see `.env.example`).
@@ -127,7 +118,6 @@ All settings are env vars (see `.env.example`).
 | `BLINK_FETCH_STATE_FILE` | `/app/config/blink-fetch-state.json` | Dedupe state for emitted events |
 | `BLINK_CAMERA_NAMES` | _(empty)_ | Optional comma-separated camera names to include |
 | `BLINK_FETCH_MAX_EVENTS` | `25` | Max events emitted per fetch run |
-| `BRIDGE_AUTH_TOKEN` | _(empty)_ | Optional token required for `POST /auth/login` + `POST /auth/2fa` via `X-Bridge-Token` |
 | `BRIDGE_URL` | `http://127.0.0.1:8787/bridge/blink/event` | Used by standalone `src/blinkPoller.js` mode |
 
 ### Compose host mapping / BirdNET-Go companion
@@ -176,49 +166,11 @@ curl -X POST http://localhost:8787/bridge/blink/event \
 
 ## API
 
-> Most users should use `blink login` instead of calling auth APIs directly.
-
 | Endpoint | Method | Description |
 |---|---|---|
-| `/health` | `GET` | Returns status and active config summary |
-| `/auth` | `GET` | Minimal auth helper UI for Blink login + 2FA |
+| `/health` | `GET` | Returns status and active config summary (includes auth state) |
 | `/auth/status` | `GET` | Returns lockout-safe auth state (`authenticated`, `needs_credentials`, `needs_2fa`, `locked_error`, `paused_fetch`, `last_error`, `last_attempt_at`, `next_allowed_attempt_at`) |
-| `/auth/save-credentials` | `POST` | Saves Blink credentials to SQLite (`{username,password}`) and pauses fetch until explicit auth test |
-| `/auth/login` | `POST` | Backward-compatible alias for `/auth/save-credentials` |
-| `/auth/2fa` | `POST` | Submits MFA code (`{code}`) |
-| `/auth/test` | `POST` | Explicitly test auth now |
-| `/auth/resume-fetch` | `POST` | Resume fetch loop (only succeeds when authenticated) |
-| `/auth/pause-fetch` | `POST` | Pause fetch loop |
 | `/bridge/blink/event` | `POST` | Appends + processes one Blink event |
-
-If `BRIDGE_AUTH_TOKEN` is set, include header `X-Bridge-Token` on all `POST /auth/*` calls.
-
-### Auth helper API examples
-
-```bash
-# status
-curl -s http://localhost:8787/auth/status | jq .
-
-# save credentials
-curl -s -X POST http://localhost:8787/auth/save-credentials \
-  -H 'Content-Type: application/json' \
-  -H 'X-Bridge-Token: YOUR_TOKEN_IF_SET' \
-  -d '{"username":"you@example.com","password":"your_password"}' | jq .
-
-# test auth now
-curl -s -X POST http://localhost:8787/auth/test \
-  -H 'X-Bridge-Token: YOUR_TOKEN_IF_SET' | jq .
-
-# submit 2FA code (if needed)
-curl -s -X POST http://localhost:8787/auth/2fa \
-  -H 'Content-Type: application/json' \
-  -H 'X-Bridge-Token: YOUR_TOKEN_IF_SET' \
-  -d '{"code":"123456"}' | jq .
-
-# resume/pause fetch
-curl -s -X POST http://localhost:8787/auth/resume-fetch -H 'X-Bridge-Token: YOUR_TOKEN_IF_SET' | jq .
-curl -s -X POST http://localhost:8787/auth/pause-fetch -H 'X-Bridge-Token: YOUR_TOKEN_IF_SET' | jq .
-```
 
 ## Unraid
 
@@ -236,12 +188,11 @@ This stack runs:
 
 - `birdnet-go-ui` (dashboard on `BIRDNET_GO_PORT`)
 - `birdnet-go-worker` (`birdnet-go directory /blink-processed --watch --recursive --output /birdnet-output`)
-- `blink-bridge` (Blink event + WAV extraction + auth helper UI/API)
+- `blink-bridge` (Blink event + WAV extraction + lockout-safe auth)
 
 Useful URLs after startup:
 
 - Bridge health: `http://<unraid-ip>:${BRIDGE_PORT:-8787}/health`
-- Bridge auth helper: `http://<unraid-ip>:${BRIDGE_PORT:-8787}/auth`
 - BirdNET UI: `http://<unraid-ip>:${BIRDNET_GO_PORT:-8080}`
 
 Check status/logs:

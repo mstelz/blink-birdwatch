@@ -41,7 +41,6 @@ export function getConfig() {
     workDir: process.env.WORK_DIR || './work',
     birdnetGoInputDir: process.env.BIRDNET_GO_INPUT_DIR || '/app/output',
     blinkAuthFile: process.env.BLINK_AUTH_FILE || '/app/config/blink-auth.json',
-    blinkDbFile: process.env.BLINK_DB_FILE || '/app/config/blink-bridge.db',
-    bridgeAuthToken: process.env.BRIDGE_AUTH_TOKEN || ''
+    blinkDbFile: process.env.BLINK_DB_FILE || '/app/config/blink-bridge.db'
   };
 }
