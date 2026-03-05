@@ -57,8 +57,7 @@ docker compose up -d
 
 ## Blink Login (recommended)
 
-Blink credentials + auth state are persisted in SQLite (`BLINK_DB_FILE`, default `/app/config/blink-bridge.db`) in the mounted config volume.
-Session artifacts are still stored in `BLINK_AUTH_FILE`.
+Blink credentials + session tokens are persisted in `BLINK_AUTH_FILE` (default `/app/config/blink-auth.json`) in the mounted config volume.
 
 Run this in the container:
 
@@ -76,13 +75,10 @@ Useful helper commands:
 
 ```bash
 docker exec -it blink-bridge blink status
-docker exec -it blink-bridge blink test
-docker exec -it blink-bridge blink pause
-docker exec -it blink-bridge blink resume
+docker exec -it blink-bridge blink status
 ```
 
-If auth fails, bridge enters a paused/locked state and **will not keep retrying Blink automatically**.
-You must explicitly reauthenticate (`blink login`) before resuming fetch.
+If auth fails, rerun `blink login` to refresh credentials/session tokens.
 
 ### Day-1 sanity check (copy/paste)
 
@@ -113,8 +109,7 @@ All settings are env vars (see `.env.example`).
 |---|---|---|
 | `BLINK_POLL_INTERVAL_SEC` | `180` | Poll interval for running `BLINK_FETCH_COMMAND` inside `blink-bridge` |
 | `BLINK_FETCH_COMMAND` | `python3 /app/bin/blink_fetch.py` | Command that prints a JSON array of events |
-| `BLINK_DB_FILE` | `/app/config/blink-bridge.db` | SQLite store for credentials + auth state machine |
-| `BLINK_AUTH_FILE` | `/app/config/blink-auth.json` | Persisted Blink auth/session file |
+| `BLINK_AUTH_FILE` | `/app/config/blink-auth.json` | Persisted Blink credentials/session file |
 | `BLINK_FETCH_STATE_FILE` | `/app/config/blink-fetch-state.json` | Dedupe state for emitted events |
 | `BLINK_CAMERA_NAMES` | _(empty)_ | Optional comma-separated camera names to include |
 | `BLINK_FETCH_MAX_EVENTS` | `25` | Max events emitted per fetch run |

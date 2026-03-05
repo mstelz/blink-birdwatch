@@ -29,15 +29,9 @@ async function getAuthStatus() {
     return {
       ok: false,
       authenticated: false,
-      needs_credentials: true,
-      needs_2fa: false,
-      locked_error: true,
-      paused_fetch: true,
+      has_credentials: false,
       last_error: err.message,
-      last_attempt_at: null,
-      next_allowed_attempt_at: null,
-      auth_file: cfg.blinkAuthFile,
-      db_file: cfg.blinkDbFile
+      auth_file: cfg.blinkAuthFile
     };
   }
 }

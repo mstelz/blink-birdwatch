@@ -4,9 +4,6 @@
 Usage:
   blink login
   blink status
-  blink pause
-  blink resume
-  blink test
 """
 
 import json
@@ -34,18 +31,6 @@ def cmd_status():
     print_json(run_auth("status"))
 
 
-def cmd_pause():
-    print_json(run_auth("pause-fetch"))
-
-
-def cmd_resume():
-    print_json(run_auth("resume-fetch"))
-
-
-def cmd_test():
-    print_json(run_auth("test-auth"))
-
-
 def cmd_login():
     # Keep login flow in one Python process so 2FA challenge context is preserved.
     proc = subprocess.run([PY, AUTH, "login"])
@@ -62,16 +47,6 @@ def main():
     if cmd == "status":
         cmd_status()
         return
-    if cmd == "pause":
-        cmd_pause()
-        return
-    if cmd == "resume":
-        cmd_resume()
-        return
-    if cmd == "test":
-        cmd_test()
-        return
-
     print(__doc__.strip())
     sys.exit(1)
 
