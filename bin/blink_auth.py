@@ -300,30 +300,69 @@ async def _interactive_login(conn):
                     paused_fetch=1,
                     last_error="Blink 2FA required",
                 )
-                code = input("Blink 2FA code (press Enter to cancel): ").strip()
-                if not code:
-                    payload = _status(conn)
-                    payload.update({"ok": False, "error": "2FA code required to continue"})
-                    _print(payload)
-                    return
-                try:
-                    await _submit_2fa(auth, blink, code)
-                    if hasattr(blink, "setup_post_verify"):
-                        await blink.setup_post_verify()
-                except Exception as v_exc:
-                    _update(
-                        conn,
-                        authenticated=0,
-                        needs_credentials=0,
-                        needs_2fa=1,
-                        locked_error=1,
-                        paused_fetch=1,
-                        last_error=_err_text(v_exc),
-                    )
-                    payload = _status(conn)
-                    payload.update({"ok": False, "error": _err_text(v_exc)})
-                    _print(payload)
-                    return
+
+                # Prefer blinkpy's interactive flow when available.
+                prompt_fn = getattr(blink, "prompt_2fa", None)
+                if callable(prompt_fn):
+                    try:
+                        await prompt_fn()
+                        if hasattr(blink, "setup_post_verify"):
+                            await blink.setup_post_verify()
+                    except Exception as prompt_exc:
+                        # Fallback to manual code entry for blinkpy versions where
+                        # prompt_2fa is unavailable/broken in this context.
+                        code = input("Blink 2FA code (press Enter to cancel): ").strip()
+                        if not code:
+                            payload = _status(conn)
+                            payload.update({
+                                "ok": False,
+                                "error": f"2FA prompt failed ({_err_text(prompt_exc)}), and no code entered",
+                            })
+                            _print(payload)
+                            return
+                        try:
+                            await _submit_2fa(auth, blink, code)
+                            if hasattr(blink, "setup_post_verify"):
+                                await blink.setup_post_verify()
+                        except Exception as v_exc:
+                            _update(
+                                conn,
+                                authenticated=0,
+                                needs_credentials=0,
+                                needs_2fa=1,
+                                locked_error=1,
+                                paused_fetch=1,
+                                last_error=_err_text(v_exc),
+                            )
+                            payload = _status(conn)
+                            payload.update({"ok": False, "error": _err_text(v_exc)})
+                            _print(payload)
+                            return
+                else:
+                    code = input("Blink 2FA code (press Enter to cancel): ").strip()
+                    if not code:
+                        payload = _status(conn)
+                        payload.update({"ok": False, "error": "2FA code required to continue"})
+                        _print(payload)
+                        return
+                    try:
+                        await _submit_2fa(auth, blink, code)
+                        if hasattr(blink, "setup_post_verify"):
+                            await blink.setup_post_verify()
+                    except Exception as v_exc:
+                        _update(
+                            conn,
+                            authenticated=0,
+                            needs_credentials=0,
+                            needs_2fa=1,
+                            locked_error=1,
+                            paused_fetch=1,
+                            last_error=_err_text(v_exc),
+                        )
+                        payload = _status(conn)
+                        payload.update({"ok": False, "error": _err_text(v_exc)})
+                        _print(payload)
+                        return
             else:
                 _update(
                     conn,
