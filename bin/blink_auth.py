@@ -160,6 +160,23 @@ async def _submit_2fa(auth, blink, code):
     raise RuntimeError("unable to submit 2FA code; compatible send_auth_key API not found: " + "; ".join(errors))
 
 
+async def _cleanup_blink_sessions(blink, session):
+    # Some blinkpy versions create extra ClientSession objects that are not
+    # guaranteed to be cleaned up by our outer context manager.
+    try:
+        bsession = getattr(blink, "session", None) or getattr(blink, "_session", None)
+        if bsession is not None and bsession is not session and not getattr(bsession, "closed", True):
+            await bsession.close()
+    except Exception:
+        pass
+
+    try:
+        if session is not None and not session.closed:
+            await session.close()
+    except Exception:
+        pass
+
+
 async def _attempt_auth(conn, twofa_code=""):
     r = _row(conn)
     username = (r["username"] or "").strip()
@@ -183,8 +200,9 @@ async def _attempt_auth(conn, twofa_code=""):
     _update(conn, last_attempt_at=now, next_allowed_attempt_at=now, last_error=None)
 
     auth = Auth({"username": username, "password": password}, no_prompt=True)
-    async with aiohttp.ClientSession() as session:
-        blink = await _new_blink(session, auth)
+    session = aiohttp.ClientSession()
+    blink = await _new_blink(session, auth)
+    try:
         try:
             await blink.start()
         except Exception as exc:
@@ -246,6 +264,8 @@ async def _attempt_auth(conn, twofa_code=""):
                 last_error=f"auth succeeded but failed to save auth file: {exc}",
             )
             return {"ok": False, "error": f"failed to save auth file: {exc}"}
+    finally:
+        await _cleanup_blink_sessions(blink, session)
 
     _update(
         conn,
@@ -285,8 +305,9 @@ async def _interactive_login(conn):
     _update(conn, last_attempt_at=now, next_allowed_attempt_at=now, last_error=None)
 
     auth = Auth({"username": username, "password": password}, no_prompt=True)
-    async with aiohttp.ClientSession() as session:
-        blink = await _new_blink(session, auth)
+    session = aiohttp.ClientSession()
+    blink = await _new_blink(session, auth)
+    try:
         try:
             await blink.start()
         except Exception as exc:
@@ -399,6 +420,8 @@ async def _interactive_login(conn):
             payload.update({"ok": False, "error": f"failed to save auth file: {save_exc}"})
             _print(payload)
             return
+    finally:
+        await _cleanup_blink_sessions(blink, session)
 
     _update(
         conn,
