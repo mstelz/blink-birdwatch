@@ -1,6 +1,6 @@
 {
   "name": "blink-birdwatch",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "Blink motion clip bridge for BirdNET-Go (download video, extract WAV, drop into shared input directory)",
   "license": "MIT",
