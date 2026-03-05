@@ -64,19 +64,14 @@ def cmd_login():
         print_json(saved)
         sys.exit(1)
 
+    # Trigger auth attempt (and trigger Blink MFA delivery when required).
     tested = run_auth("test-auth")
-    if tested.get("ok") and tested.get("authenticated"):
-        print("\nAuthenticated successfully.")
-        resumed = run_auth("resume-fetch")
-        print_json(resumed)
-        return
 
-    if tested.get("needs_2fa"):
-        print("\nBlink requires 2FA.")
-        code = input("Enter Blink 2FA code: ").strip()
-        if not code:
-            print("2FA code required", file=sys.stderr)
-            sys.exit(1)
+    print("\nIf Blink sent a 2FA code, paste it now.")
+    print("If 2FA is not required, just press Enter.")
+    code = input("Blink 2FA code (optional): ").strip()
+
+    if code:
         verified = run_auth("verify-2fa", code)
         if not verified.get("ok") or not verified.get("authenticated"):
             print_json(verified)
@@ -85,6 +80,18 @@ def cmd_login():
         resumed = run_auth("resume-fetch")
         print_json(resumed)
         return
+
+    if tested.get("ok") and tested.get("authenticated"):
+        print("\nAuthenticated successfully.")
+        resumed = run_auth("resume-fetch")
+        print_json(resumed)
+        return
+
+    if tested.get("needs_2fa"):
+        print("\n2FA is required but no code was entered.")
+        print_json(tested)
+        print("\nFetch remains paused for safety. Re-run: blink login")
+        sys.exit(1)
 
     print("\nAuthentication failed.")
     print_json(tested)
