@@ -98,8 +98,15 @@ def _update(conn, **fields):
     conn.commit()
 
 
+def _err_text(err: Exception) -> str:
+    msg = str(err).strip()
+    if msg:
+        return msg
+    return repr(err)
+
+
 def _needs_2fa(err: Exception) -> bool:
-    msg = str(err).lower()
+    msg = _err_text(err).lower()
     return "2fa" in msg or "auth key" in msg or "verification" in msg
 
 
@@ -167,9 +174,9 @@ async def _attempt_auth(conn, twofa_code=""):
                         needs_2fa=1,
                         locked_error=1,
                         paused_fetch=1,
-                        last_error=str(v_exc),
+                        last_error=_err_text(v_exc),
                     )
-                    return {"ok": False, "error": str(v_exc), "needs_2fa": True}
+                    return {"ok": False, "error": _err_text(v_exc), "needs_2fa": True}
             else:
                 _update(
                     conn,
@@ -178,9 +185,9 @@ async def _attempt_auth(conn, twofa_code=""):
                     needs_2fa=0,
                     locked_error=1,
                     paused_fetch=1,
-                    last_error=str(exc),
+                    last_error=_err_text(exc),
                 )
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "error": _err_text(exc)}
 
         try:
             await blink.refresh(force=True)
@@ -271,10 +278,10 @@ async def _interactive_login(conn):
                         needs_2fa=1,
                         locked_error=1,
                         paused_fetch=1,
-                        last_error=str(v_exc),
+                        last_error=_err_text(v_exc),
                     )
                     payload = _status(conn)
-                    payload.update({"ok": False, "error": str(v_exc)})
+                    payload.update({"ok": False, "error": _err_text(v_exc)})
                     _print(payload)
                     return
             else:
@@ -285,10 +292,10 @@ async def _interactive_login(conn):
                     needs_2fa=0,
                     locked_error=1,
                     paused_fetch=1,
-                    last_error=str(exc),
+                    last_error=_err_text(exc),
                 )
                 payload = _status(conn)
-                payload.update({"ok": False, "error": str(exc)})
+                payload.update({"ok": False, "error": _err_text(exc)})
                 _print(payload)
                 return
 
