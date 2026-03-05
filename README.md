@@ -153,6 +153,10 @@ curl -X POST http://localhost:8787/bridge/blink/event \
 
 ## Unraid
 
+You have two deployment options:
+
+### Option A: Unraid template (single bridge container)
+
 - Install BirdNET-Go separately (`ghcr.io/tphakala/birdnet-go`).
 - Use included `unraid-template.xml` for `blink-bridge`.
 - Mount these paths:
@@ -167,6 +171,32 @@ curl -X POST http://localhost:8787/bridge/blink/event \
 For first-time MFA, set `BLINK_2FA_CODE`, start container once, then clear it after successful auth.
 
 **Important:** `/app/output` must map to the same host directory BirdNET-Go is watching.
+
+### Option B: Compose stack on Unraid (UI + worker + bridge)
+
+Use `docker-compose.unraid.yml` to run everything together:
+
+1. Copy `unraid.env.example` to `.env` and set host share paths.
+2. Start stack:
+
+```bash
+docker compose -f docker-compose.unraid.yml up -d --build
+```
+
+This stack runs:
+
+- `birdnet-go-ui` (dashboard on `BIRDNET_GO_PORT`)
+- `birdnet-go-worker` (`birdnet-go directory /output --watch --recursive`)
+- `blink-bridge` (Blink event + WAV extraction)
+
+Check status/logs:
+
+```bash
+docker compose -f docker-compose.unraid.yml ps
+docker compose -f docker-compose.unraid.yml logs -f birdnet-go-ui
+docker compose -f docker-compose.unraid.yml logs -f birdnet-go-worker
+docker compose -f docker-compose.unraid.yml logs -f blink-bridge
+```
 
 ## Development
 

@@ -1,0 +1,47 @@
+services:
+  # BirdNET-Go dashboard/API container
+  birdnet-go-ui:
+    image: ghcr.io/tphakala/birdnet-go:nightly
+    container_name: birdnet-go-ui
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-America/Chicago}
+      - BIRDNET_UID=${BIRDNET_UID:-99}
+      - BIRDNET_GID=${BIRDNET_GID:-100}
+    ports:
+      - "${BIRDNET_GO_PORT:-8080}:8080"
+    volumes:
+      - ${BIRDNET_CONFIG_DIR:-./birdnet-go/config}:/config
+      - ${BIRDNET_DATA_DIR:-./birdnet-go/data}:/data
+      - ${BIRDNET_OUTPUT_DIR:-./output}:/output
+
+  # BirdNET-Go file watcher worker (processes WAV files from bridge)
+  birdnet-go-worker:
+    image: ghcr.io/tphakala/birdnet-go:nightly
+    container_name: birdnet-go-worker
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-America/Chicago}
+      - BIRDNET_UID=${BIRDNET_UID:-99}
+      - BIRDNET_GID=${BIRDNET_GID:-100}
+    command: ["birdnet-go", "directory", "/output", "--watch", "--recursive", "--output", "/output"]
+    volumes:
+      - ${BIRDNET_CONFIG_DIR:-./birdnet-go/config}:/config
+      - ${BIRDNET_DATA_DIR:-./birdnet-go/data}:/data
+      - ${BIRDNET_OUTPUT_DIR:-./output}:/output
+
+  # Blink motion -> WAV bridge
+  blink-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: blink-bridge
+    restart: unless-stopped
+    ports:
+      - "${BRIDGE_PORT:-8787}:${PORT:-8787}"
+    env_file:
+      - .env
+    volumes:
+      - ${BLINK_CONFIG_DIR:-./config}:/app/config
+      - ${BLINK_WORK_DIR:-./work}:/app/work
+      - ${BIRDNET_OUTPUT_DIR:-./output}:/app/output
