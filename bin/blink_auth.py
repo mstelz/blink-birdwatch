@@ -115,25 +115,11 @@ async def _interactive_login():
     blink = await _new_blink(session, auth)
 
     try:
-        # Use start() as primary path (most stable across blinkpy versions).
-        start_fn = getattr(blink, "start", None)
-        if not callable(start_fn):
-            raise RuntimeError("blinkpy object has no start method")
+        # Follow documented blinkpy flow: start(), then optional 2FA handling.
+        await blink.start()
 
-        await start_fn()
-
-        # Some builds require setup after start.
-        setup_fn = getattr(blink, "setup", None)
-        if callable(setup_fn):
-            try:
-                await setup_fn()
-            except Exception:
-                # Non-fatal; many versions don't need explicit setup.
-                pass
-
-        refresh_fn = getattr(blink, "refresh", None)
-        if callable(refresh_fn):
-            await refresh_fn(force=True)
+        if hasattr(blink, "refresh"):
+            await blink.refresh(force=True)
 
         await blink.save(auth_file)
         print(json.dumps(_status_payload()))
@@ -145,13 +131,17 @@ async def _interactive_login():
                 if callable(prompt_fn):
                     await prompt_fn()
                 else:
-                    code = input("Blink 2FA code: ").strip()
+                    code = input("Enter the two-factor authentication code: ").strip()
                     if not code:
                         raise RuntimeError("2FA code is required")
-                    auth.key = code
+                    # Common documented path.
+                    if hasattr(auth, "send_auth_key"):
+                        await auth.send_auth_key(blink, code)
+                    else:
+                        raise RuntimeError("blinkpy auth handler has no send_auth_key; upgrade/downgrade blinkpy")
+                    if hasattr(blink, "setup_post_verify"):
+                        await blink.setup_post_verify()
 
-                if hasattr(blink, "setup_post_verify"):
-                    await blink.setup_post_verify()
                 if hasattr(blink, "refresh"):
                     await blink.refresh(force=True)
                 await blink.save(auth_file)

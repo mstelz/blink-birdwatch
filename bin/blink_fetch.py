@@ -121,7 +121,6 @@ async def _main():
 
     try:
         await blink.start()
-        await _ensure_blink_ready(blink)
         await blink.refresh(force=True)
 
         include = set(name.strip().lower() for name in camera_filter.split(",") if name.strip())
