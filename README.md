@@ -55,7 +55,7 @@ docker compose up -d
 - BirdNET-Go UI: `http://localhost:${BIRDNET_GO_PORT:-8080}`
 - Bridge health: `http://localhost:${BRIDGE_PORT:-8787}/health`
 
-### First-time Blink authentication (recommended: interactive CLI)
+## Blink Login (recommended)
 
 Blink credentials + auth state are persisted in SQLite (`BLINK_DB_FILE`, default `/app/config/blink-bridge.db`) in the mounted config volume.
 Session artifacts are still stored in `BLINK_AUTH_FILE`.
@@ -68,9 +68,9 @@ docker exec -it blink-bridge blink login
 
 The helper will:
 1. Prompt for username + password
-2. Test auth
-3. Prompt for 2FA code when required
-4. Resume fetch automatically on successful auth
+2. Handle 2FA in the same process (when required)
+3. Save session auth
+4. Resume fetch automatically on success
 
 Useful helper commands:
 
@@ -84,13 +84,22 @@ docker exec -it blink-bridge blink resume
 If auth fails, bridge enters a paused/locked state and **will not keep retrying Blink automatically**.
 You must explicitly reauthenticate (`blink login`) before resuming fetch.
 
+### Day-1 sanity check (copy/paste)
+
+```bash
+docker compose ps
+docker exec -it blink-bridge blink login
+docker exec -it blink-bridge blink status
+docker logs -f blink-bridge
+```
+
 ### Migration note (from env-based auth)
 
 Older versions relied on `BLINK_USERNAME`, `BLINK_PASSWORD`, and `BLINK_2FA_CODE` env-driven login attempts.
 This has been removed to prevent repeated failed retries/lockouts.
 
 - Existing auth/session files are still used (`BLINK_AUTH_FILE`).
-- Configure `BLINK_DB_FILE` and use `/auth` UI/API for credentials + reauth actions.
+- Configure `BLINK_DB_FILE` and use `blink login` for credentials + reauth.
 - `BLINK_2FA_CODE` env flow is deprecated/disabled.
 
 ## Configuration
@@ -133,7 +142,7 @@ All settings are env vars (see `.env.example`).
 
 You can feed events in three ways:
 
-1. **Built-in Blink cloud fetch** (recommended): set Blink auth env vars and keep `BLINK_FETCH_COMMAND=python3 /app/bin/blink_fetch.py`
+1. **Built-in Blink cloud fetch** (recommended): run `blink login` once, then keep `BLINK_FETCH_COMMAND=python3 /app/bin/blink_fetch.py`
 2. **File polling**: write events to `BLINK_EVENTS_FILE`
 3. **HTTP push**: POST one event to `/bridge/blink/event`
 4. **Standalone poller**: run `npm run poller` with any custom `BLINK_FETCH_COMMAND`
@@ -166,6 +175,8 @@ curl -X POST http://localhost:8787/bridge/blink/event \
 ```
 
 ## API
+
+> Most users should use `blink login` instead of calling auth APIs directly.
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -217,7 +228,8 @@ Use `docker-compose.unraid.yml` to run everything together (UI + worker + bridge
 2. Start stack:
 
 ```bash
-docker compose -f docker-compose.unraid.yml up -d --build
+docker compose -f docker-compose.unraid.yml pull
+docker compose -f docker-compose.unraid.yml up -d
 ```
 
 This stack runs:
