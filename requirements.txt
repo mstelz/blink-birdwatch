@@ -1,2 +1,2 @@
-aiohttp==3.10.11
-blinkpy==0.22.7
+aiohttp>=3.10,<4
+blinkpy>=0.25.5,<0.26
