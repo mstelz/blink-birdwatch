@@ -95,8 +95,8 @@ async function processMotionEvent(motion) {
   pruneSeenIds();
   persistSeenIds();
 
-  if (!motion.mediaUrl) {
-    console.error(`[bridge] skipping motion ${motion.id}: mediaUrl is missing`);
+  if (!motion.mediaUrl && !motion.localFile) {
+    console.error(`[bridge] skipping motion ${motion.id}: mediaUrl/localFile is missing`);
     return;
   }
 
@@ -107,7 +107,11 @@ async function processMotionEvent(motion) {
   const outPath = path.join(cfg.birdnetGoInputDir, `${stamp}.wav`);
 
   try {
-    await downloadFile(motion.mediaUrl, videoPath);
+    if (motion.localFile) {
+      fs.copyFileSync(motion.localFile, videoPath);
+    } else {
+      await downloadFile(motion.mediaUrl, videoPath);
+    }
     await extractAudioFromVideo(videoPath, wavPath);
     fs.mkdirSync(cfg.birdnetGoInputDir, { recursive: true });
     fs.renameSync(wavPath, outPath);

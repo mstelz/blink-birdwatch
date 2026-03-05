@@ -26,6 +26,7 @@ export function appendBlinkEvent(filePath, event) {
     id: event.id,
     timestamp: event.timestamp || new Date().toISOString(),
     mediaUrl: event.mediaUrl || null,
+    localFile: event.localFile || null,
     thumbnailUrl: event.thumbnailUrl || null,
     source: event.source || 'blink'
   });

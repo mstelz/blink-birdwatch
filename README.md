@@ -118,6 +118,7 @@ All settings are env vars (see `.env.example`).
 | `BLINK_FETCH_STATE_FILE` | `/app/config/blink-fetch-state.json` | Dedupe state for emitted events |
 | `BLINK_CAMERA_NAMES` | _(empty)_ | Optional comma-separated camera names to include |
 | `BLINK_FETCH_MAX_EVENTS` | `25` | Max events emitted per fetch run |
+| `BLINK_DOWNLOAD_DIR` | `/app/work/blink-downloads` | Directory used by Blink `download_videos` fetch mode |
 | `BRIDGE_URL` | `http://127.0.0.1:8787/bridge/blink/event` | Used by standalone `src/blinkPoller.js` mode |
 
 ### Compose host mapping / BirdNET-Go companion
@@ -132,7 +133,7 @@ All settings are env vars (see `.env.example`).
 
 You can feed events in three ways:
 
-1. **Built-in Blink cloud fetch** (recommended): run `blink login` once, then keep `BLINK_FETCH_COMMAND=python3 /app/bin/blink_fetch.py`
+1. **Built-in Blink cloud fetch** (recommended): run `blink login` once, then keep `BLINK_FETCH_COMMAND=python3 /app/bin/blink_fetch.py` (uses Blink `download_videos` when available, fallback to `recent_clips`)
 2. **File polling**: write events to `BLINK_EVENTS_FILE`
 3. **HTTP push**: POST one event to `/bridge/blink/event`
 4. **Standalone poller**: run `npm run poller` with any custom `BLINK_FETCH_COMMAND`
