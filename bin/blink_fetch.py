@@ -71,9 +71,14 @@ async def _new_blink(session, auth):
         return blink
 
 
-def _ensure_blink_ready(blink):
+async def _ensure_blink_ready(blink):
+    # Some blinkpy versions need explicit setup before base_url is available.
+    setup = getattr(blink, "setup", None)
+    if callable(setup):
+        await setup()
+
     base_url = getattr(blink, "base_url", None) or getattr(blink, "_base_url", None)
-    if base_url is None:
+    if not base_url:
         raise RuntimeError("Cannot setup Blink platform (base_url missing)")
 
 
@@ -116,7 +121,7 @@ async def _main():
 
     try:
         await blink.start()
-        _ensure_blink_ready(blink)
+        await _ensure_blink_ready(blink)
         await blink.refresh(force=True)
 
         include = set(name.strip().lower() for name in camera_filter.split(",") if name.strip())

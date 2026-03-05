@@ -103,28 +103,55 @@ async def _interactive_login():
     blink = await _new_blink(session, auth)
 
     try:
-        try:
-            await blink.start()
-        except Exception as exc:
-            if _needs_2fa(exc):
-                prompt_fn = getattr(blink, "prompt_2fa", None)
-                if callable(prompt_fn):
-                    await prompt_fn()
-                else:
-                    print(json.dumps({"ok": False, "error": "2FA required but prompt_2fa not available"}))
-                    return 1
+        # Prefer native interactive login path when exposed by blinkpy.
+        login_fn = getattr(blink, "login", None)
+        start_fn = getattr(blink, "start", None)
 
-                if hasattr(blink, "setup_post_verify"):
-                    await blink.setup_post_verify()
-            else:
-                print(json.dumps({"ok": False, "error": _err_text(exc)}))
-                return 1
+        if callable(login_fn):
+            await login_fn()
+        elif callable(start_fn):
+            await start_fn()
+        else:
+            raise RuntimeError("blinkpy object has no login/start method")
 
-        await blink.refresh(force=True)
+        setup_fn = getattr(blink, "setup", None)
+        if callable(setup_fn):
+            await setup_fn()
+
+        base_url = getattr(blink, "base_url", None) or getattr(blink, "_base_url", None)
+        if not base_url:
+            raise RuntimeError("Cannot setup Blink platform (base_url missing)")
+
+        refresh_fn = getattr(blink, "refresh", None)
+        if callable(refresh_fn):
+            await refresh_fn(force=True)
+
         await blink.save(auth_file)
         print(json.dumps(_status_payload()))
         return 0
     except Exception as exc:
+        if _needs_2fa(exc):
+            try:
+                prompt_fn = getattr(blink, "prompt_2fa", None)
+                if callable(prompt_fn):
+                    await prompt_fn()
+                else:
+                    code = input("Blink 2FA code: ").strip()
+                    if not code:
+                        raise RuntimeError("2FA code is required")
+                    auth.key = code
+
+                if hasattr(blink, "setup_post_verify"):
+                    await blink.setup_post_verify()
+                if hasattr(blink, "refresh"):
+                    await blink.refresh(force=True)
+                await blink.save(auth_file)
+                print(json.dumps(_status_payload()))
+                return 0
+            except Exception as twofa_exc:
+                print(json.dumps({"ok": False, "error": _err_text(twofa_exc)}))
+                return 1
+
         print(json.dumps({"ok": False, "error": _err_text(exc)}))
         return 1
     finally:
