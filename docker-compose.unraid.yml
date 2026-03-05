@@ -13,7 +13,8 @@ services:
     volumes:
       - ${BIRDNET_CONFIG_DIR:-./birdnet-go/config}:/config
       - ${BIRDNET_DATA_DIR:-./birdnet-go/data}:/data
-      - ${BIRDNET_OUTPUT_DIR:-./output}:/output
+      - ${BIRDNET_WATCH_DIR:-./output}:/blink-processed
+      - ${BIRDNET_RESULT_DIR:-./birdnet-output}:/birdnet-output
 
   # BirdNET-Go file watcher worker (processes WAV files from bridge)
   birdnet-go-worker:
@@ -24,11 +25,12 @@ services:
       - TZ=${TZ:-America/Chicago}
       - BIRDNET_UID=${BIRDNET_UID:-99}
       - BIRDNET_GID=${BIRDNET_GID:-100}
-    command: ["birdnet-go", "directory", "/output", "--watch", "--recursive", "--output", "/output"]
+    command: ["birdnet-go", "directory", "/blink-processed", "--watch", "--recursive", "--output", "/birdnet-output"]
     volumes:
       - ${BIRDNET_CONFIG_DIR:-./birdnet-go/config}:/config
       - ${BIRDNET_DATA_DIR:-./birdnet-go/data}:/data
-      - ${BIRDNET_OUTPUT_DIR:-./output}:/output
+      - ${BIRDNET_WATCH_DIR:-./output}:/blink-processed
+      - ${BIRDNET_RESULT_DIR:-./birdnet-output}:/birdnet-output
 
   # Blink motion -> WAV bridge
   blink-bridge:
@@ -44,4 +46,4 @@ services:
     volumes:
       - ${BLINK_CONFIG_DIR:-./config}:/app/config
       - ${BLINK_WORK_DIR:-./work}:/app/work
-      - ${BIRDNET_OUTPUT_DIR:-./output}:/app/output
+      - ${BIRDNET_WATCH_DIR:-./output}:/app/output

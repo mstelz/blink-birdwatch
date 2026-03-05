@@ -186,7 +186,7 @@ docker compose -f docker-compose.unraid.yml up -d --build
 This stack runs:
 
 - `birdnet-go-ui` (dashboard on `BIRDNET_GO_PORT`)
-- `birdnet-go-worker` (`birdnet-go directory /output --watch --recursive`)
+- `birdnet-go-worker` (`birdnet-go directory /blink-processed --watch --recursive --output /birdnet-output`)
 - `blink-bridge` (Blink event + WAV extraction)
 
 Check status/logs:
