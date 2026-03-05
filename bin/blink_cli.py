@@ -9,7 +9,6 @@ Usage:
   blink test
 """
 
-import getpass
 import json
 import os
 import subprocess
@@ -48,55 +47,10 @@ def cmd_test():
 
 
 def cmd_login():
-    print("Blink interactive login")
-    print("- credentials are stored in BLINK_DB_FILE")
-    print("- session tokens are stored in BLINK_AUTH_FILE")
-    print()
-
-    username = input("Blink username/email: ").strip()
-    password = getpass.getpass("Blink password: ").strip()
-    if not username or not password:
-        print("username/password required", file=sys.stderr)
-        sys.exit(1)
-
-    saved = run_auth("save-credentials", username, password)
-    if not saved.get("ok"):
-        print_json(saved)
-        sys.exit(1)
-
-    # Trigger auth attempt (and trigger Blink MFA delivery when required).
-    tested = run_auth("test-auth")
-
-    print("\nIf Blink sent a 2FA code, paste it now.")
-    print("If 2FA is not required, just press Enter.")
-    code = input("Blink 2FA code (optional): ").strip()
-
-    if code:
-        verified = run_auth("verify-2fa", code)
-        if not verified.get("ok") or not verified.get("authenticated"):
-            print_json(verified)
-            sys.exit(1)
-        print("\n2FA verified.")
-        resumed = run_auth("resume-fetch")
-        print_json(resumed)
-        return
-
-    if tested.get("ok") and tested.get("authenticated"):
-        print("\nAuthenticated successfully.")
-        resumed = run_auth("resume-fetch")
-        print_json(resumed)
-        return
-
-    if tested.get("needs_2fa"):
-        print("\n2FA is required but no code was entered.")
-        print_json(tested)
-        print("\nFetch remains paused for safety. Re-run: blink login")
-        sys.exit(1)
-
-    print("\nAuthentication failed.")
-    print_json(tested)
-    print("\nFetch remains paused for safety. Re-run: blink login")
-    sys.exit(1)
+    # Keep login flow in one Python process so 2FA challenge context is preserved.
+    proc = subprocess.run([PY, AUTH, "login"])
+    if proc.returncode != 0:
+        sys.exit(proc.returncode)
 
 
 def main():

@@ -11,6 +11,7 @@ Commands:
 """
 
 import asyncio
+import getpass
 import json
 import os
 import sqlite3
@@ -213,12 +214,129 @@ async def _attempt_auth(conn, twofa_code=""):
     return {"ok": True}
 
 
+async def _interactive_login(conn):
+    print("Blink interactive login")
+    username = input("Blink username/email: ").strip()
+    password = getpass.getpass("Blink password: ").strip()
+    if not username or not password:
+        _print({"ok": False, "error": "username and password are required"})
+        return
+
+    _update(
+        conn,
+        username=username,
+        password=password,
+        authenticated=0,
+        needs_credentials=0,
+        needs_2fa=0,
+        locked_error=0,
+        paused_fetch=1,
+        last_error=None,
+        next_allowed_attempt_at=_utc_now(),
+    )
+
+    now = _utc_now()
+    _update(conn, last_attempt_at=now, next_allowed_attempt_at=now, last_error=None)
+
+    auth = Auth({"username": username, "password": password}, no_prompt=True)
+    async with aiohttp.ClientSession() as session:
+        blink = await _new_blink(session, auth)
+        try:
+            await blink.start()
+        except Exception as exc:
+            if _needs_2fa(exc):
+                _update(
+                    conn,
+                    authenticated=0,
+                    needs_credentials=0,
+                    needs_2fa=1,
+                    locked_error=0,
+                    paused_fetch=1,
+                    last_error="Blink 2FA required",
+                )
+                code = input("Blink 2FA code (press Enter to cancel): ").strip()
+                if not code:
+                    payload = _status(conn)
+                    payload.update({"ok": False, "error": "2FA code required to continue"})
+                    _print(payload)
+                    return
+                try:
+                    await auth.send_auth_key(blink, code)
+                    await blink.setup_post_verify()
+                except Exception as v_exc:
+                    _update(
+                        conn,
+                        authenticated=0,
+                        needs_credentials=0,
+                        needs_2fa=1,
+                        locked_error=1,
+                        paused_fetch=1,
+                        last_error=str(v_exc),
+                    )
+                    payload = _status(conn)
+                    payload.update({"ok": False, "error": str(v_exc)})
+                    _print(payload)
+                    return
+            else:
+                _update(
+                    conn,
+                    authenticated=0,
+                    needs_credentials=0,
+                    needs_2fa=0,
+                    locked_error=1,
+                    paused_fetch=1,
+                    last_error=str(exc),
+                )
+                payload = _status(conn)
+                payload.update({"ok": False, "error": str(exc)})
+                _print(payload)
+                return
+
+        try:
+            await blink.refresh(force=True)
+        except Exception:
+            pass
+
+        try:
+            await blink.save(_auth_file())
+        except Exception as save_exc:
+            _update(
+                conn,
+                authenticated=0,
+                needs_credentials=0,
+                needs_2fa=0,
+                locked_error=1,
+                paused_fetch=1,
+                last_error=f"auth succeeded but failed to save auth file: {save_exc}",
+            )
+            payload = _status(conn)
+            payload.update({"ok": False, "error": f"failed to save auth file: {save_exc}"})
+            _print(payload)
+            return
+
+    _update(
+        conn,
+        authenticated=1,
+        needs_credentials=0,
+        needs_2fa=0,
+        locked_error=0,
+        paused_fetch=0,
+        last_error=None,
+        next_allowed_attempt_at=None,
+    )
+    _print(_status(conn))
+
+
 async def _main():
     cmd = (sys.argv[1] if len(sys.argv) > 1 else "status").strip().lower()
     conn = _connect()
 
     if cmd == "status":
         _print(_status(conn))
+        return
+
+    if cmd == "login":
+        await _interactive_login(conn)
         return
 
     if cmd == "save-credentials":
