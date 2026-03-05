@@ -34,9 +34,7 @@ services:
 
   # Blink motion -> WAV bridge
   blink-bridge:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/mstelz/blink-birdwatch:latest
     container_name: blink-bridge
     restart: unless-stopped
     ports:
