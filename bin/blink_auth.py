@@ -252,10 +252,9 @@ async def _attempt_auth(conn, twofa_code=""):
                 )
                 return {"ok": False, "error": _err_text(exc)}
 
-        _ensure_blink_ready(blink)
-        await blink.refresh(force=True)
-
         try:
+            _ensure_blink_ready(blink)
+            await blink.refresh(force=True)
             await blink.save(_auth_file())
         except Exception as exc:
             _update(
@@ -265,9 +264,9 @@ async def _attempt_auth(conn, twofa_code=""):
                 needs_2fa=0,
                 locked_error=1,
                 paused_fetch=1,
-                last_error=f"auth succeeded but failed to save auth file: {exc}",
+                last_error=_err_text(exc),
             )
-            return {"ok": False, "error": f"failed to save auth file: {exc}"}
+            return {"ok": False, "error": _err_text(exc)}
     finally:
         await _cleanup_blink_sessions(blink, session)
 
@@ -403,12 +402,11 @@ async def _interactive_login(conn):
                 _print(payload)
                 return
 
-        _ensure_blink_ready(blink)
-        await blink.refresh(force=True)
-
         try:
+            _ensure_blink_ready(blink)
+            await blink.refresh(force=True)
             await blink.save(_auth_file())
-        except Exception as save_exc:
+        except Exception as setup_exc:
             _update(
                 conn,
                 authenticated=0,
@@ -416,10 +414,10 @@ async def _interactive_login(conn):
                 needs_2fa=0,
                 locked_error=1,
                 paused_fetch=1,
-                last_error=f"auth succeeded but failed to save auth file: {save_exc}",
+                last_error=_err_text(setup_exc),
             )
             payload = _status(conn)
-            payload.update({"ok": False, "error": f"failed to save auth file: {save_exc}"})
+            payload.update({"ok": False, "error": _err_text(setup_exc)})
             _print(payload)
             return
     finally:
