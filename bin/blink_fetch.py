@@ -49,7 +49,16 @@ async def _start_blink(auth_file, username, password, twofa_code):
 
     auth = Auth(creds, no_prompt=True)
     async with aiohttp.ClientSession() as session:
-        blink = Blink(session=session, auth=auth)
+        # blinkpy API changed across versions; support both old/new ctor signatures.
+        try:
+            blink = Blink(session=session, auth=auth)
+        except TypeError:
+            blink = Blink(session=session)
+            if hasattr(blink, "auth"):
+                blink.auth = auth
+            elif hasattr(blink, "_auth"):
+                blink._auth = auth
+
         try:
             await blink.start()
         except Exception as exc:
