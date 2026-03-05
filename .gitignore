@@ -1,6 +1,8 @@
 # Dependencies
 node_modules/
 .venv-birdnet/
+__pycache__/
+*.pyc
 
 # Environment / secrets
 .env
