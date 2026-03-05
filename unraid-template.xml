@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>blink-bridge</Name>
+  <Repository>ghcr.io/mstelz/blink-birdwatch:latest</Repository>
+  <Registry>https://ghcr.io</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/mstelz/blink-birdwatch</Support>
+  <Project>https://github.com/mstelz/blink-birdwatch</Project>
+  <Overview>Blink Bridge: polls Blink motion events, downloads video clips, extracts audio via ffmpeg, and drops WAV files into a shared directory for BirdNET-Go to process. Install BirdNET-Go separately (ghcr.io/tphakala/birdnet-go) and point it at the same output directory.</Overview>
+  <Category>HomeAutomation:Other</Category>
+  <WebUI>http://[IP]:[PORT:8787]/health</WebUI>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/selfhst/icons/main/svg/bird.svg</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Description>Blink Bridge container for Unraid. Works alongside BirdNET-Go (install separately). Mount /app/config, /app/work, and /app/output. The output directory must be shared with BirdNET-Go's input/watch directory.</Description>
+  <Networking>
+    <Mode>bridge</Mode>
+    <Publish>
+      <Port>
+        <HostPort>8787</HostPort>
+        <ContainerPort>8787</ContainerPort>
+        <Protocol>tcp</Protocol>
+      </Port>
+    </Publish>
+  </Networking>
+
+  <Config Name="Bridge Port" Target="8787" Default="8787" Mode="tcp" Description="Blink Bridge API port" Type="Port" Display="always" Required="true" Mask="false">8787</Config>
+
+  <Config Name="AppData (config)" Target="/app/config" Default="/mnt/user/appdata/blink-bridge/config" Mode="rw" Description="Persistent blink-events.json and config assets" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/blink-bridge/config</Config>
+  <Config Name="Work Directory" Target="/app/work" Default="/mnt/user/blink-bridge/work" Mode="rw" Description="Temp processing directory for clips/audio (can be large — point to array/share, not appdata)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/blink-bridge/work</Config>
+  <Config Name="Output Directory" Target="/app/output" Default="/mnt/user/blink-bridge/output" Mode="rw" Description="WAV files dropped here for BirdNET-Go to process — must match BirdNET-Go's watch/input directory" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/blink-bridge/output</Config>
+
+  <Config Name="PORT" Target="PORT" Default="8787" Mode="" Description="App listen port inside container" Type="Variable" Display="advanced" Required="false" Mask="false">8787</Config>
+  <Config Name="POLL_INTERVAL_SEC" Target="POLL_INTERVAL_SEC" Default="180" Mode="" Description="Poll interval for file-based ingest" Type="Variable" Display="advanced" Required="false" Mask="false">180</Config>
+  <Config Name="BLINK_EVENTS_FILE" Target="BLINK_EVENTS_FILE" Default="/app/config/blink-events.json" Mode="" Description="Path to blink events JSON" Type="Variable" Display="always" Required="true" Mask="false">/app/config/blink-events.json</Config>
+  <Config Name="WORK_DIR" Target="WORK_DIR" Default="/app/work" Mode="" Description="Temp/work directory for clip/audio processing" Type="Variable" Display="advanced" Required="false" Mask="false">/app/work</Config>
+  <Config Name="BIRDNET_GO_INPUT_DIR" Target="BIRDNET_GO_INPUT_DIR" Default="/app/output" Mode="" Description="Directory where WAV files are dropped for BirdNET-Go" Type="Variable" Display="always" Required="true" Mask="false">/app/output</Config>
+
+  <Config Name="BLINK_POLL_INTERVAL_SEC" Target="BLINK_POLL_INTERVAL_SEC" Default="180" Mode="" Description="Poll interval for BLINK_FETCH_COMMAND mode" Type="Variable" Display="advanced" Required="false" Mask="false">180</Config>
+  <Config Name="BRIDGE_URL" Target="BRIDGE_URL" Default="http://127.0.0.1:8787/bridge/blink/event" Mode="" Description="Bridge endpoint for poller/fetch command" Type="Variable" Display="advanced" Required="false" Mask="false">http://127.0.0.1:8787/bridge/blink/event</Config>
+  <Config Name="BLINK_FETCH_COMMAND" Target="BLINK_FETCH_COMMAND" Default="" Mode="" Description="Optional command that outputs JSON events for poller" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+</Container>

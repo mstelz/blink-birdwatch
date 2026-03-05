@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+.venv-birdnet/
+
+# Environment / secrets
+.env
+
+# Runtime data
+data/
+work/
+output/
+birdnet-go/
+
+# Local config (contains local URLs/IPs)
+config/blink-events.json
+
+# Logs
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db

@@ -1,0 +1,28 @@
+services:
+  birdnet-go:
+    image: ghcr.io/tphakala/birdnet-go:latest
+    container_name: birdnet-go
+    restart: unless-stopped
+    ports:
+      - "${BIRDNET_GO_PORT:-8080}:8080"
+    environment:
+      - TZ=${TZ:-America/Chicago}
+    volumes:
+      - ./birdnet-go/config:/config
+      - ./birdnet-go/data:/data
+      - ./output:/output:ro
+
+  blink-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: blink-bridge
+    restart: unless-stopped
+    ports:
+      - "${BRIDGE_PORT:-8787}:${PORT:-8787}"
+    env_file:
+      - .env
+    volumes:
+      - ./config:/app/config
+      - ./work:/app/work
+      - ./output:/app/output

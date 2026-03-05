@@ -1,0 +1,9 @@
+[
+  {
+    "id": "motion-001",
+    "timestamp": "2026-03-03T03:00:00Z",
+    "mediaUrl": "https://example.local/blink/clip-001.mp4",
+    "thumbnailUrl": "https://example.local/blink/thumb-001.jpg",
+    "source": "blink"
+  }
+]
