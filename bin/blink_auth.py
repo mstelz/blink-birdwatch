@@ -107,7 +107,14 @@ def _err_text(err: Exception) -> str:
 
 def _needs_2fa(err: Exception) -> bool:
     msg = _err_text(err).lower()
-    return "2fa" in msg or "auth key" in msg or "verification" in msg
+    # blinkpy may raise names like BlinkTwoFARequiredError()
+    return (
+        "2fa" in msg
+        or "twofa" in msg
+        or "auth key" in msg
+        or "verification" in msg
+        or "required" in msg and "blink" in msg and "fa" in msg
+    )
 
 
 async def _new_blink(session, auth):
