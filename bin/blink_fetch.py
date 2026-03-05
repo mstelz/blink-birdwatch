@@ -69,17 +69,6 @@ async def _new_blink(session, auth):
     return blink
 
 
-async def _ensure_blink_ready(blink):
-    # Some blinkpy versions need explicit setup before base_url is available.
-    setup = getattr(blink, "setup", None)
-    if callable(setup):
-        await setup()
-
-    base_url = getattr(blink, "base_url", None) or getattr(blink, "_base_url", None)
-    if not base_url:
-        raise RuntimeError("Cannot setup Blink platform (base_url missing)")
-
-
 async def _cleanup(blink, session):
     try:
         bsession = getattr(blink, "session", None) or getattr(blink, "_session", None)
