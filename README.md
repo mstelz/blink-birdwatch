@@ -46,14 +46,30 @@ cp .env.example .env
 # host paths mounted by docker-compose
 mkdir -p config work output birdnet-go/config birdnet-go/data
 
-# seed events store
+# optional file ingest seed (safe to leave empty)
 echo '[]' > config/blink-events.json
+
+# set Blink credentials in .env
+# BLINK_USERNAME=you@example.com
+# BLINK_PASSWORD=your_password
 
 docker compose up -d
 ```
 
 - BirdNET-Go UI: `http://localhost:${BIRDNET_GO_PORT:-8080}`
 - Bridge health: `http://localhost:${BRIDGE_PORT:-8787}/health`
+
+### First-time Blink authentication (MFA)
+
+`blink_fetch.py` caches Blink session tokens in `BLINK_AUTH_FILE` (default `/app/config/blink-auth.json`).
+
+If your Blink account requires MFA (common), do this once:
+
+1. Set `BLINK_2FA_CODE` in `.env` to the email code Blink sends.
+2. Restart container: `docker compose restart blink-bridge`
+3. Wait for successful auth in logs, then clear `BLINK_2FA_CODE`.
+
+After that, normal runs use the cached auth file and should not require re-login unless Blink invalidates the session.
 
 ## Configuration
 
@@ -69,13 +85,20 @@ All settings are env vars (see `.env.example`).
 | `WORK_DIR` | `./work` | Temporary MP4/WAV processing directory |
 | `BIRDNET_GO_INPUT_DIR` | `/app/output` | Directory where WAVs are dropped |
 
-### Optional external fetch/poller mode
+### Blink cloud fetch mode (built-in auth)
 
 | Variable | Default | Description |
 |---|---|---|
-| `BLINK_POLL_INTERVAL_SEC` | `180` | Poll interval for `BLINK_FETCH_COMMAND` loop |
-| `BRIDGE_URL` | `http://127.0.0.1:8787/bridge/blink/event` | Target bridge endpoint used by `src/blinkPoller.js` |
-| `BLINK_FETCH_COMMAND` | _(empty)_ | Command that prints a JSON array of events |
+| `BLINK_POLL_INTERVAL_SEC` | `180` | Poll interval for running `BLINK_FETCH_COMMAND` inside `blink-bridge` |
+| `BLINK_FETCH_COMMAND` | `python3 /app/bin/blink_fetch.py` | Command that prints a JSON array of events |
+| `BLINK_USERNAME` | _(empty)_ | Blink account username/email |
+| `BLINK_PASSWORD` | _(empty)_ | Blink account password |
+| `BLINK_2FA_CODE` | _(empty)_ | One-time MFA code from Blink email (clear after first success) |
+| `BLINK_AUTH_FILE` | `/app/config/blink-auth.json` | Persisted Blink auth/session file |
+| `BLINK_FETCH_STATE_FILE` | `/app/config/blink-fetch-state.json` | Dedupe state for emitted events |
+| `BLINK_CAMERA_NAMES` | _(empty)_ | Optional comma-separated camera names to include |
+| `BLINK_FETCH_MAX_EVENTS` | `25` | Max events emitted per fetch run |
+| `BRIDGE_URL` | `http://127.0.0.1:8787/bridge/blink/event` | Used by standalone `src/blinkPoller.js` mode |
 
 ### Compose host mapping / BirdNET-Go companion
 
@@ -89,9 +112,10 @@ All settings are env vars (see `.env.example`).
 
 You can feed events in three ways:
 
-1. **File polling**: write events to `BLINK_EVENTS_FILE`
-2. **HTTP push**: POST one event to `/bridge/blink/event`
-3. **External poller**: run `npm run poller` with `BLINK_FETCH_COMMAND`
+1. **Built-in Blink cloud fetch** (recommended): set Blink auth env vars and keep `BLINK_FETCH_COMMAND=python3 /app/bin/blink_fetch.py`
+2. **File polling**: write events to `BLINK_EVENTS_FILE`
+3. **HTTP push**: POST one event to `/bridge/blink/event`
+4. **Standalone poller**: run `npm run poller` with any custom `BLINK_FETCH_COMMAND`
 
 ### Event schema
 
@@ -135,6 +159,12 @@ curl -X POST http://localhost:8787/bridge/blink/event \
   - `/app/config`
   - `/app/work`
   - `/app/output`
+- Set Blink auth variables in the template:
+  - `BLINK_USERNAME`
+  - `BLINK_PASSWORD`
+  - `BLINK_FETCH_COMMAND=python3 /app/bin/blink_fetch.py`
+
+For first-time MFA, set `BLINK_2FA_CODE`, start container once, then clear it after successful auth.
 
 **Important:** `/app/output` must map to the same host directory BirdNET-Go is watching.
 

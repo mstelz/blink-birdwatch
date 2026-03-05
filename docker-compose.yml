@@ -26,3 +26,4 @@ services:
       - ./config:/app/config
       - ./work:/app/work
       - ./output:/app/output
+

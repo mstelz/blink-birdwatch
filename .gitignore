@@ -11,8 +11,10 @@ work/
 output/
 birdnet-go/
 
-# Local config (contains local URLs/IPs)
+# Local config (contains local URLs/IPs/tokens)
 config/blink-events.json
+config/blink-auth.json
+config/blink-fetch-state.json
 
 # Logs
 *.log

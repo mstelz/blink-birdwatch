@@ -35,7 +35,9 @@ export function getConfig() {
   return {
     port: numberFromEnv(process.env.PORT, 8787),
     pollIntervalSec: numberFromEnv(process.env.POLL_INTERVAL_SEC, 180),
+    blinkPollIntervalSec: numberFromEnv(process.env.BLINK_POLL_INTERVAL_SEC, 180),
     blinkEventsFile: process.env.BLINK_EVENTS_FILE || './config/blink-events.json',
+    blinkFetchCommand: process.env.BLINK_FETCH_COMMAND || '',
     workDir: process.env.WORK_DIR || './work',
     birdnetGoInputDir: process.env.BIRDNET_GO_INPUT_DIR || '/app/output'
   };

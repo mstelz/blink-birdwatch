@@ -46,5 +46,13 @@
 
   <Config Name="BLINK_POLL_INTERVAL_SEC" Target="BLINK_POLL_INTERVAL_SEC" Default="180" Mode="" Description="Poll interval for BLINK_FETCH_COMMAND mode" Type="Variable" Display="advanced" Required="false" Mask="false">180</Config>
   <Config Name="BRIDGE_URL" Target="BRIDGE_URL" Default="http://127.0.0.1:8787/bridge/blink/event" Mode="" Description="Bridge endpoint for poller/fetch command" Type="Variable" Display="advanced" Required="false" Mask="false">http://127.0.0.1:8787/bridge/blink/event</Config>
-  <Config Name="BLINK_FETCH_COMMAND" Target="BLINK_FETCH_COMMAND" Default="" Mode="" Description="Optional command that outputs JSON events for poller" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="BLINK_FETCH_COMMAND" Target="BLINK_FETCH_COMMAND" Default="python3 /app/bin/blink_fetch.py" Mode="" Description="Command that outputs JSON events (defaults to bundled blinkpy fetcher)" Type="Variable" Display="always" Required="true" Mask="false">python3 /app/bin/blink_fetch.py</Config>
+
+  <Config Name="BLINK_USERNAME" Target="BLINK_USERNAME" Default="" Mode="" Description="Blink account email/username" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="BLINK_PASSWORD" Target="BLINK_PASSWORD" Default="" Mode="" Description="Blink account password" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="BLINK_2FA_CODE" Target="BLINK_2FA_CODE" Default="" Mode="" Description="One-time Blink email MFA code (clear after successful auth)" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="BLINK_AUTH_FILE" Target="BLINK_AUTH_FILE" Default="/app/config/blink-auth.json" Mode="" Description="Path to persisted Blink auth/session token file" Type="Variable" Display="advanced" Required="false" Mask="false">/app/config/blink-auth.json</Config>
+  <Config Name="BLINK_FETCH_STATE_FILE" Target="BLINK_FETCH_STATE_FILE" Default="/app/config/blink-fetch-state.json" Mode="" Description="Path to fetcher dedupe state file" Type="Variable" Display="advanced" Required="false" Mask="false">/app/config/blink-fetch-state.json</Config>
+  <Config Name="BLINK_CAMERA_NAMES" Target="BLINK_CAMERA_NAMES" Default="" Mode="" Description="Optional comma-separated camera names to include" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="BLINK_FETCH_MAX_EVENTS" Target="BLINK_FETCH_MAX_EVENTS" Default="25" Mode="" Description="Max events emitted per fetch run" Type="Variable" Display="advanced" Required="false" Mask="false">25</Config>
 </Container>

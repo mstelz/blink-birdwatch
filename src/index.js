@@ -1,6 +1,8 @@
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import { exec as execCb } from 'node:child_process';
+import { promisify } from 'node:util';
 import { loadEnvFile, getConfig } from './config.js';
 import { getBlinkEvents } from './providers/blinkFileProvider.js';
 import { appendBlinkEvent } from './blinkBridge.js';
@@ -10,6 +12,8 @@ loadEnvFile();
 const cfg = getConfig();
 const app = express();
 app.use(express.json());
+
+const exec = promisify(execCb);
 
 const MAX_SEEN_IDS = 10_000;
 const workDir = path.resolve(process.cwd(), cfg.workDir);
@@ -107,6 +111,34 @@ async function processBlinkEvents() {
   }
 }
 
+async function pollBlinkFetchCommand() {
+  if (!cfg.blinkFetchCommand) return;
+
+  try {
+    const { stdout } = await exec(cfg.blinkFetchCommand, { maxBuffer: 10 * 1024 * 1024 });
+    const parsed = JSON.parse(stdout || '[]');
+    if (!Array.isArray(parsed)) {
+      throw new Error('BLINK_FETCH_COMMAND must output a JSON array');
+    }
+
+    let added = 0;
+    for (const motion of parsed) {
+      if (!motion?.id) continue;
+      const appended = appendBlinkEvent(cfg.blinkEventsFile, motion);
+      if (appended) {
+        added += 1;
+        await processMotionEvent(motion);
+      }
+    }
+
+    if (parsed.length > 0) {
+      console.log(`[bridge] blink fetch command returned ${parsed.length} event(s), added ${added}`);
+    }
+  } catch (err) {
+    console.error(`[bridge] BLINK_FETCH_COMMAND failed: ${err.message}`);
+  }
+}
+
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
@@ -133,20 +165,33 @@ app.post('/bridge/blink/event', async (req, res) => {
 
 loadSeenIds();
 processBlinkEvents().catch((e) => console.error('initial poll error', e.message));
+if (cfg.blinkFetchCommand) {
+  pollBlinkFetchCommand().catch((e) => console.error('initial fetch-command poll error', e.message));
+}
 
 const pollTimer = setInterval(() => {
   processBlinkEvents().catch((e) => console.error('poll error', e.message));
 }, cfg.pollIntervalSec * 1000);
 
+const fetchTimer = cfg.blinkFetchCommand
+  ? setInterval(() => {
+      pollBlinkFetchCommand().catch((e) => console.error('fetch-command poll error', e.message));
+    }, cfg.blinkPollIntervalSec * 1000)
+  : null;
+
 const server = app.listen(cfg.port, () => {
   console.log(`blink-bridge running on :${cfg.port}`);
   console.log(`polling blink events from ${cfg.blinkEventsFile} every ${cfg.pollIntervalSec}s`);
+  if (cfg.blinkFetchCommand) {
+    console.log(`running BLINK_FETCH_COMMAND every ${cfg.blinkPollIntervalSec}s`);
+  }
   console.log(`dropping WAV files into ${cfg.birdnetGoInputDir}`);
 });
 
 function shutdown(signal) {
   console.log(`[bridge] received ${signal}, shutting down`);
   clearInterval(pollTimer);
+  if (fetchTimer) clearInterval(fetchTimer);
   server.close(() => process.exit(0));
 }
 
