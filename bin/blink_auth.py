@@ -115,20 +115,21 @@ async def _interactive_login():
     blink = await _new_blink(session, auth)
 
     try:
-        # Prefer native interactive login path when exposed by blinkpy.
-        login_fn = getattr(blink, "login", None)
+        # Use start() as primary path (most stable across blinkpy versions).
         start_fn = getattr(blink, "start", None)
+        if not callable(start_fn):
+            raise RuntimeError("blinkpy object has no start method")
 
-        if callable(login_fn):
-            await login_fn()
-        elif callable(start_fn):
-            await start_fn()
-        else:
-            raise RuntimeError("blinkpy object has no login/start method")
+        await start_fn()
 
+        # Some builds require setup after start.
         setup_fn = getattr(blink, "setup", None)
         if callable(setup_fn):
-            await setup_fn()
+            try:
+                await setup_fn()
+            except Exception:
+                # Non-fatal; many versions don't need explicit setup.
+                pass
 
         refresh_fn = getattr(blink, "refresh", None)
         if callable(refresh_fn):
