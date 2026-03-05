@@ -1,31 +1,100 @@
 #!/usr/bin/env python3
-"""Blink auth helper for bridge API/UI.
+"""Blink auth/state helper backed by SQLite.
 
 Commands:
   status
+  save-credentials <username> <password>
   verify-2fa <code>
+  test-auth
+  pause-fetch
+  resume-fetch
 """
 
 import asyncio
 import json
 import os
+import sqlite3
 import sys
+from datetime import datetime, timezone
 
 import aiohttp
 from blinkpy.auth import Auth
 from blinkpy.blinkpy import Blink
 
 
-def _load_json(path, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _print(obj):
     print(json.dumps(obj))
+
+
+def _db_path():
+    return os.getenv("BLINK_DB_FILE", "/app/config/blink-bridge.db").strip()
+
+
+def _auth_file():
+    return os.getenv("BLINK_AUTH_FILE", "/app/config/blink-auth.json").strip()
+
+
+def _connect():
+    path = _db_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS auth_state (
+          id INTEGER PRIMARY KEY CHECK(id=1),
+          username TEXT,
+          password TEXT,
+          authenticated INTEGER NOT NULL DEFAULT 0,
+          needs_credentials INTEGER NOT NULL DEFAULT 1,
+          needs_2fa INTEGER NOT NULL DEFAULT 0,
+          locked_error INTEGER NOT NULL DEFAULT 0,
+          paused_fetch INTEGER NOT NULL DEFAULT 1,
+          last_error TEXT,
+          last_attempt_at TEXT,
+          next_allowed_attempt_at TEXT,
+          updated_at TEXT
+        )
+        """
+    )
+    conn.execute("INSERT OR IGNORE INTO auth_state(id, updated_at) VALUES(1, ?)", (_utc_now(),))
+    conn.commit()
+    return conn
+
+
+def _row(conn):
+    return conn.execute("SELECT * FROM auth_state WHERE id=1").fetchone()
+
+
+def _status(conn):
+    r = _row(conn)
+    return {
+        "ok": True,
+        "auth_file": _auth_file(),
+        "db_file": _db_path(),
+        "authenticated": bool(r["authenticated"]),
+        "needs_credentials": bool(r["needs_credentials"]),
+        "needs_2fa": bool(r["needs_2fa"]),
+        "locked_error": bool(r["locked_error"]),
+        "paused_fetch": bool(r["paused_fetch"]),
+        "last_error": r["last_error"],
+        "last_attempt_at": r["last_attempt_at"],
+        "next_allowed_attempt_at": r["next_allowed_attempt_at"],
+        "has_credentials": bool(r["username"] and r["password"]),
+    }
+
+
+def _update(conn, **fields):
+    fields["updated_at"] = _utc_now()
+    keys = sorted(fields.keys())
+    sets = ", ".join(f"{k}=?" for k in keys)
+    vals = [fields[k] for k in keys]
+    conn.execute(f"UPDATE auth_state SET {sets} WHERE id=1", vals)
+    conn.commit()
 
 
 def _needs_2fa(err: Exception) -> bool:
@@ -45,93 +114,132 @@ async def _new_blink(session, auth):
         return blink
 
 
-async def _attempt(auth_file, username, password, twofa_code=""):
-    creds = _load_json(auth_file, {})
-    if not creds:
-        if not username or not password:
-            return {
-                "ok": False,
-                "authenticated": False,
-                "needs2fa": False,
-                "hasCredentials": False,
-                "authFile": auth_file,
-                "error": "missing Blink credentials",
-            }
-        creds = {"username": username, "password": password}
+async def _attempt_auth(conn, twofa_code=""):
+    r = _row(conn)
+    username = (r["username"] or "").strip()
+    password = (r["password"] or "").strip()
+    now = _utc_now()
 
-    auth = Auth(creds, no_prompt=True)
+    if not username or not password:
+        _update(
+            conn,
+            authenticated=0,
+            needs_credentials=1,
+            needs_2fa=0,
+            locked_error=0,
+            paused_fetch=1,
+            last_error="missing Blink credentials",
+            last_attempt_at=now,
+            next_allowed_attempt_at=now,
+        )
+        return {"ok": False, "error": "missing Blink credentials"}
+
+    _update(conn, last_attempt_at=now, next_allowed_attempt_at=now, last_error=None)
+
+    auth = Auth({"username": username, "password": password}, no_prompt=True)
     async with aiohttp.ClientSession() as session:
         blink = await _new_blink(session, auth)
         try:
             await blink.start()
         except Exception as exc:
             if _needs_2fa(exc):
-                if twofa_code:
-                    try:
-                        await auth.send_auth_key(blink, twofa_code)
-                        await blink.setup_post_verify()
-                    except Exception as v_exc:
-                        return {
-                            "ok": False,
-                            "authenticated": False,
-                            "needs2fa": True,
-                            "hasCredentials": True,
-                            "authFile": auth_file,
-                            "error": str(v_exc),
-                        }
-                else:
-                    return {
-                        "ok": True,
-                        "authenticated": False,
-                        "needs2fa": True,
-                        "hasCredentials": True,
-                        "authFile": auth_file,
-                    }
+                if not twofa_code:
+                    _update(
+                        conn,
+                        authenticated=0,
+                        needs_credentials=0,
+                        needs_2fa=1,
+                        locked_error=0,
+                        paused_fetch=1,
+                        last_error="Blink 2FA required",
+                    )
+                    return {"ok": False, "error": "Blink 2FA required", "needs_2fa": True}
+
+                try:
+                    await auth.send_auth_key(blink, twofa_code)
+                    await blink.setup_post_verify()
+                except Exception as v_exc:
+                    _update(
+                        conn,
+                        authenticated=0,
+                        needs_credentials=0,
+                        needs_2fa=1,
+                        locked_error=1,
+                        paused_fetch=1,
+                        last_error=str(v_exc),
+                    )
+                    return {"ok": False, "error": str(v_exc), "needs_2fa": True}
             else:
-                return {
-                    "ok": False,
-                    "authenticated": False,
-                    "needs2fa": False,
-                    "hasCredentials": True,
-                    "authFile": auth_file,
-                    "error": str(exc),
-                }
+                _update(
+                    conn,
+                    authenticated=0,
+                    needs_credentials=0,
+                    needs_2fa=0,
+                    locked_error=1,
+                    paused_fetch=1,
+                    last_error=str(exc),
+                )
+                return {"ok": False, "error": str(exc)}
 
         try:
             await blink.refresh(force=True)
         except Exception:
-            # Start success is enough to consider auth valid.
             pass
 
         try:
-            await blink.save(auth_file)
+            await blink.save(_auth_file())
         except Exception as exc:
-            return {
-                "ok": False,
-                "authenticated": True,
-                "needs2fa": False,
-                "hasCredentials": True,
-                "authFile": auth_file,
-                "error": f"auth succeeded but failed to save auth file: {exc}",
-            }
+            _update(
+                conn,
+                authenticated=0,
+                needs_credentials=0,
+                needs_2fa=0,
+                locked_error=1,
+                paused_fetch=1,
+                last_error=f"auth succeeded but failed to save auth file: {exc}",
+            )
+            return {"ok": False, "error": f"failed to save auth file: {exc}"}
 
-        return {
-            "ok": True,
-            "authenticated": True,
-            "needs2fa": False,
-            "hasCredentials": True,
-            "authFile": auth_file,
-        }
+    _update(
+        conn,
+        authenticated=1,
+        needs_credentials=0,
+        needs_2fa=0,
+        locked_error=0,
+        paused_fetch=0,
+        last_error=None,
+        next_allowed_attempt_at=None,
+    )
+    return {"ok": True}
 
 
 async def _main():
     cmd = (sys.argv[1] if len(sys.argv) > 1 else "status").strip().lower()
-    auth_file = os.getenv("BLINK_AUTH_FILE", "/app/config/blink-auth.json").strip()
-    username = os.getenv("BLINK_USERNAME", "").strip()
-    password = os.getenv("BLINK_PASSWORD", "").strip()
+    conn = _connect()
 
     if cmd == "status":
-        _print(await _attempt(auth_file, username, password, ""))
+        _print(_status(conn))
+        return
+
+    if cmd == "save-credentials":
+        username = (sys.argv[2] if len(sys.argv) > 2 else "").strip()
+        password = (sys.argv[3] if len(sys.argv) > 3 else "").strip()
+        if not username or not password:
+            _print({"ok": False, "error": "username and password are required"})
+            return
+        _update(
+            conn,
+            username=username,
+            password=password,
+            authenticated=0,
+            needs_credentials=0,
+            needs_2fa=0,
+            locked_error=0,
+            paused_fetch=1,
+            last_error=None,
+            next_allowed_attempt_at=_utc_now(),
+        )
+        _print(_status(conn))
         return
 
     if cmd == "verify-2fa":
@@ -139,7 +247,39 @@ async def _main():
         if not code:
             _print({"ok": False, "error": "2fa code required"})
             return
-        _print(await _attempt(auth_file, username, password, code))
+        result = await _attempt_auth(conn, code)
+        payload = _status(conn)
+        payload["ok"] = bool(result.get("ok"))
+        if result.get("error"):
+            payload["error"] = result["error"]
+        _print(payload)
+        return
+
+    if cmd == "test-auth":
+        result = await _attempt_auth(conn, "")
+        payload = _status(conn)
+        payload["ok"] = bool(result.get("ok"))
+        if result.get("error"):
+            payload["error"] = result["error"]
+        _print(payload)
+        return
+
+    if cmd == "pause-fetch":
+        _update(conn, paused_fetch=1)
+        _print(_status(conn))
+        return
+
+    if cmd == "resume-fetch":
+        s = _status(conn)
+        if not s.get("authenticated"):
+            _print({
+                "ok": False,
+                "error": "cannot resume fetching until authentication succeeds",
+                **s,
+            })
+            return
+        _update(conn, paused_fetch=0, locked_error=0, last_error=None, next_allowed_attempt_at=None)
+        _print(_status(conn))
         return
 
     _print({"ok": False, "error": f"unknown command: {cmd}"})

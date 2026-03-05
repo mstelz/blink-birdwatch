@@ -14,7 +14,6 @@ const app = express();
 app.use(express.json());
 
 const exec = promisify(execCb);
-let authLastError = '';
 
 async function runJsonCommand(command) {
   const { stdout, stderr } = await exec(command, { maxBuffer: 10 * 1024 * 1024 });
@@ -25,18 +24,20 @@ async function runJsonCommand(command) {
 
 async function getAuthStatus() {
   try {
-    const data = await runJsonCommand('python3 /app/bin/blink_auth.py status');
-    if (!data.ok && data.error) authLastError = data.error;
-    return { ...data, lastError: authLastError || undefined };
+    return await runJsonCommand('python3 /app/bin/blink_auth.py status');
   } catch (err) {
-    authLastError = err.message;
     return {
       ok: false,
       authenticated: false,
-      needs2fa: false,
-      hasCredentials: Boolean(process.env.BLINK_USERNAME && process.env.BLINK_PASSWORD),
-      authFile: cfg.blinkAuthFile,
-      lastError: authLastError
+      needs_credentials: true,
+      needs_2fa: false,
+      locked_error: true,
+      paused_fetch: true,
+      last_error: err.message,
+      last_attempt_at: null,
+      next_allowed_attempt_at: null,
+      auth_file: cfg.blinkAuthFile,
+      db_file: cfg.blinkDbFile
     };
   }
 }
@@ -121,21 +122,16 @@ async function processMotionEvent(motion) {
     fs.renameSync(wavPath, outPath);
     console.log(`[bridge] dropped ${path.basename(outPath)} into ${cfg.birdnetGoInputDir}`);
   } catch (err) {
-    // allow retry in subsequent polls for transient failures
     seenMotionIds.delete(motion.id);
     persistSeenIds();
     console.error(`[bridge] failed to process motion ${motion.id}: ${err.message}`);
   } finally {
     try {
       if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
-    } catch {
-      // best effort cleanup
-    }
+    } catch {}
     try {
       if (fs.existsSync(wavPath)) fs.unlinkSync(wavPath);
-    } catch {
-      // best effort cleanup
-    }
+    } catch {}
   }
 }
 
@@ -149,12 +145,17 @@ async function processBlinkEvents() {
 async function pollBlinkFetchCommand() {
   if (!cfg.blinkFetchCommand) return;
 
+  const auth = await getAuthStatus();
+  if (!auth.ok || auth.paused_fetch || auth.locked_error || auth.needs_credentials || auth.needs_2fa) {
+    const why = auth.last_error || (auth.needs_2fa ? 'needs 2FA' : auth.needs_credentials ? 'needs credentials' : 'paused/locked');
+    console.log(`[bridge] blink fetch skipped (${why})`);
+    return;
+  }
+
   try {
     const { stdout } = await exec(cfg.blinkFetchCommand, { maxBuffer: 10 * 1024 * 1024 });
     const parsed = JSON.parse(stdout || '[]');
-    if (!Array.isArray(parsed)) {
-      throw new Error('BLINK_FETCH_COMMAND must output a JSON array');
-    }
+    if (!Array.isArray(parsed)) throw new Error('BLINK_FETCH_COMMAND must output a JSON array');
 
     let added = 0;
     for (const motion of parsed) {
@@ -172,12 +173,14 @@ async function pollBlinkFetchCommand() {
   }
 }
 
-app.get('/health', (_req, res) => {
+app.get('/health', async (_req, res) => {
+  const auth = await getAuthStatus();
   res.json({
     ok: true,
     pollIntervalSec: cfg.pollIntervalSec,
     birdnetGoInputDir: cfg.birdnetGoInputDir,
-    seenEvents: seenMotionIds.size
+    seenEvents: seenMotionIds.size,
+    auth
   });
 });
 
@@ -186,7 +189,7 @@ app.get('/auth/status', async (_req, res) => {
   res.json(status);
 });
 
-app.post('/auth/login', requireBridgeToken, (req, res) => {
+app.post('/auth/save-credentials', requireBridgeToken, async (req, res) => {
   const username = String(req.body?.username || '').trim();
   const password = String(req.body?.password || '').trim();
   if (!username || !password) {
@@ -194,14 +197,17 @@ app.post('/auth/login', requireBridgeToken, (req, res) => {
   }
 
   try {
-    fs.mkdirSync(path.dirname(cfg.blinkAuthFile), { recursive: true });
-    fs.writeFileSync(cfg.blinkAuthFile, `${JSON.stringify({ username, password }, null, 2)}\n`, 'utf8');
-    authLastError = '';
-    return res.json({ ok: true, authFile: cfg.blinkAuthFile });
+    const data = await runJsonCommand(`python3 /app/bin/blink_auth.py save-credentials ${JSON.stringify(username)} ${JSON.stringify(password)}`);
+    return res.json(data);
   } catch (err) {
-    authLastError = err.message;
     return res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+app.post('/auth/login', requireBridgeToken, async (req, res) => {
+  // Backward-compatible alias
+  req.url = '/auth/save-credentials';
+  return app._router.handle(req, res);
 });
 
 app.post('/auth/2fa', requireBridgeToken, async (req, res) => {
@@ -210,11 +216,36 @@ app.post('/auth/2fa', requireBridgeToken, async (req, res) => {
 
   try {
     const data = await runJsonCommand(`python3 /app/bin/blink_auth.py verify-2fa ${JSON.stringify(code)}`);
-    if (!data.ok && data.error) authLastError = data.error;
-    return res.status(data.ok ? 200 : 400).json({ ...data, lastError: authLastError || undefined });
+    return res.status(data.ok ? 200 : 400).json(data);
   } catch (err) {
-    authLastError = err.message;
-    return res.status(500).json({ ok: false, error: err.message, lastError: authLastError });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/auth/test', requireBridgeToken, async (_req, res) => {
+  try {
+    const data = await runJsonCommand('python3 /app/bin/blink_auth.py test-auth');
+    return res.status(data.ok ? 200 : 400).json(data);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/auth/pause-fetch', requireBridgeToken, async (_req, res) => {
+  try {
+    const data = await runJsonCommand('python3 /app/bin/blink_auth.py pause-fetch');
+    return res.json(data);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/auth/resume-fetch', requireBridgeToken, async (_req, res) => {
+  try {
+    const data = await runJsonCommand('python3 /app/bin/blink_auth.py resume-fetch');
+    return res.status(data.ok ? 200 : 400).json(data);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -226,10 +257,10 @@ app.get('/auth', (_req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Blink Bridge Auth</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 680px; margin: 2rem auto; padding: 0 1rem; }
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
     .row { margin: 0.75rem 0; }
     input { padding: 0.5rem; width: 100%; box-sizing: border-box; }
-    button { padding: 0.55rem 0.8rem; }
+    button { padding: 0.55rem 0.8rem; margin-right: 0.5rem; margin-top: 0.4rem; }
     code { background: #f3f3f3; padding: 0.15rem 0.3rem; border-radius: 4px; }
     .ok { color: #0b7a0b; }
     .bad { color: #b42318; }
@@ -241,16 +272,22 @@ app.get('/auth', (_req, res) => {
   <div class="row">Status: <strong id="status">loading...</strong></div>
   <div class="row muted" id="meta"></div>
 
-  <h3>Set Credentials (optional)</h3>
+  <h3>1) Save Credentials</h3>
   <div class="row"><input id="username" placeholder="Blink username/email" /></div>
   <div class="row"><input id="password" placeholder="Blink password" type="password" /></div>
-  <div class="row"><button id="saveLogin">Save Login</button></div>
+  <div class="row"><button id="saveLogin">Save credentials</button></div>
 
-  <h3>Submit 2FA Code</h3>
+  <h3>2) 2FA (if required)</h3>
   <div class="row"><input id="code" placeholder="123456" /></div>
-  <div class="row"><button id="submit2fa">Verify 2FA</button></div>
+  <div class="row"><button id="submit2fa">Submit 2FA</button></div>
 
-  <div class="row"><button id="refresh">Refresh status</button></div>
+  <h3>3) Controls</h3>
+  <div class="row">
+    <button id="testAuth">Test auth now</button>
+    <button id="resume">Resume fetching</button>
+    <button id="pause">Pause fetching</button>
+    <button id="refresh">Refresh status</button>
+  </div>
   <pre id="out" class="muted"></pre>
 
 <script>
@@ -263,40 +300,48 @@ function tokenHeader() {
   return t ? { 'X-Bridge-Token': t } : {};
 }
 
+function stateText(j) {
+  if (j.authenticated) return 'authenticated';
+  if (j.needs_credentials) return 'needs_credentials';
+  if (j.needs_2fa) return 'needs_2fa';
+  if (j.locked_error) return 'locked/error';
+  return 'unknown';
+}
+
 async function loadStatus() {
   const r = await fetch('/auth/status');
   const j = await r.json();
-  const txt = j.authenticated ? 'authenticated' : (j.needs2fa ? 'needs 2FA' : 'not authenticated');
+  const txt = stateText(j) + (j.paused_fetch ? ' + paused_fetch' : '');
   statusEl.textContent = txt;
-  statusEl.className = j.authenticated ? 'ok' : 'bad';
-  metaEl.textContent = 'authFile: ' + (j.authFile || 'n/a') + ' | hasCredentials: ' + Boolean(j.hasCredentials);
-  if (j.lastError) out.textContent = 'lastError: ' + j.lastError;
+  statusEl.className = j.authenticated && !j.paused_fetch ? 'ok' : 'bad';
+  metaEl.textContent = [
+    'last_error: ' + (j.last_error || 'none'),
+    'last_attempt_at: ' + (j.last_attempt_at || 'n/a'),
+    'next_allowed_attempt_at: ' + (j.next_allowed_attempt_at || 'n/a')
+  ].join(' | ');
+  out.textContent = JSON.stringify(j, null, 2);
+}
+
+async function post(url, body={}) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...tokenHeader() },
+    body: JSON.stringify(body)
+  });
+  const j = await r.json();
+  out.textContent = JSON.stringify(j, null, 2);
+  await loadStatus();
 }
 
 document.getElementById('refresh').onclick = loadStatus;
-
-document.getElementById('saveLogin').onclick = async () => {
-  const username = document.getElementById('username').value.trim();
-  const password = document.getElementById('password').value.trim();
-  const r = await fetch('/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...tokenHeader() },
-    body: JSON.stringify({ username, password })
-  });
-  out.textContent = JSON.stringify(await r.json(), null, 2);
-  await loadStatus();
-};
-
-document.getElementById('submit2fa').onclick = async () => {
-  const code = document.getElementById('code').value.trim();
-  const r = await fetch('/auth/2fa', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...tokenHeader() },
-    body: JSON.stringify({ code })
-  });
-  out.textContent = JSON.stringify(await r.json(), null, 2);
-  await loadStatus();
-};
+document.getElementById('saveLogin').onclick = () => post('/auth/save-credentials', {
+  username: document.getElementById('username').value.trim(),
+  password: document.getElementById('password').value.trim()
+});
+document.getElementById('submit2fa').onclick = () => post('/auth/2fa', { code: document.getElementById('code').value.trim() });
+document.getElementById('testAuth').onclick = () => post('/auth/test');
+document.getElementById('resume').onclick = () => post('/auth/resume-fetch');
+document.getElementById('pause').onclick = () => post('/auth/pause-fetch');
 
 (() => {
   const existing = localStorage.getItem('bridgeToken');
@@ -346,8 +391,9 @@ const server = app.listen(cfg.port, () => {
   console.log(`blink-bridge running on :${cfg.port}`);
   console.log(`polling blink events from ${cfg.blinkEventsFile} every ${cfg.pollIntervalSec}s`);
   if (cfg.blinkFetchCommand) {
-    console.log(`running BLINK_FETCH_COMMAND every ${cfg.blinkPollIntervalSec}s`);
+    console.log(`running BLINK_FETCH_COMMAND every ${cfg.blinkPollIntervalSec}s (lockout-safe mode)`);
   }
+  console.log(`auth db: ${cfg.blinkDbFile}`);
   console.log(`dropping WAV files into ${cfg.birdnetGoInputDir}`);
 });
 
