@@ -3,6 +3,12 @@ name: Build and Push Image
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional image tag for manual publish (example: 0.1.6)'
+        required: false
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -37,6 +43,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
             type=raw,value=latest
 
       - name: Build and push
