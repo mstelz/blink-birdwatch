@@ -16,7 +16,9 @@ RUN npm ci --omit=dev
 
 COPY . .
 
-RUN mkdir -p /app/config /app/work /app/output
+RUN chmod +x /app/bin/blink_cli.py \
+    && ln -sf /app/bin/blink_cli.py /usr/local/bin/blink \
+    && mkdir -p /app/config /app/work /app/output
 
 EXPOSE 8787
 

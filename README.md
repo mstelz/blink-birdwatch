@@ -55,20 +55,34 @@ docker compose up -d
 - BirdNET-Go UI: `http://localhost:${BIRDNET_GO_PORT:-8080}`
 - Bridge health: `http://localhost:${BRIDGE_PORT:-8787}/health`
 
-### First-time Blink authentication (lockout-safe)
+### First-time Blink authentication (recommended: interactive CLI)
 
 Blink credentials + auth state are persisted in SQLite (`BLINK_DB_FILE`, default `/app/config/blink-bridge.db`) in the mounted config volume.
 Session artifacts are still stored in `BLINK_AUTH_FILE`.
 
-1. Open `http://localhost:${BRIDGE_PORT:-8787}/auth`
-2. Click **Save credentials**
-3. Click **Test auth now**
-4. If prompted, submit code via **Submit 2FA**
-5. Confirm status shows `authenticated`
-6. Click **Resume fetching** (resume is allowed only when authenticated)
+Run this in the container:
+
+```bash
+docker exec -it blink-bridge blink login
+```
+
+The helper will:
+1. Prompt for username + password
+2. Test auth
+3. Prompt for 2FA code when required
+4. Resume fetch automatically on successful auth
+
+Useful helper commands:
+
+```bash
+docker exec -it blink-bridge blink status
+docker exec -it blink-bridge blink test
+docker exec -it blink-bridge blink pause
+docker exec -it blink-bridge blink resume
+```
 
 If auth fails, bridge enters a paused/locked state and **will not keep retrying Blink automatically**.
-You must explicitly reauthenticate via UI/API (`save credentials`, `test auth`, optional `submit 2FA`) before resuming fetch.
+You must explicitly reauthenticate (`blink login`) before resuming fetch.
 
 ### Migration note (from env-based auth)
 
