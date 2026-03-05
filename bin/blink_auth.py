@@ -46,15 +46,13 @@ def _needs_2fa(err: Exception) -> bool:
 
 
 async def _new_blink(session, auth):
-    try:
-        return Blink(session=session, auth=auth)
-    except TypeError:
-        blink = Blink(session=session)
-        if hasattr(blink, "auth"):
-            blink.auth = auth
-        elif hasattr(blink, "_auth"):
-            blink._auth = auth
-        return blink
+    # Follow blinkpy docs path explicitly: construct Blink(session=...), then assign auth.
+    blink = Blink(session=session)
+    if hasattr(blink, "auth"):
+        blink.auth = auth
+    elif hasattr(blink, "_auth"):
+        blink._auth = auth
+    return blink
 
 
 async def _cleanup(blink, session, auth=None):

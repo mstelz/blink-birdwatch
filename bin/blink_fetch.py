@@ -60,15 +60,13 @@ def _to_download_since(iso_ts):
 
 
 async def _new_blink(session, auth):
-    try:
-        return Blink(session=session, auth=auth)
-    except TypeError:
-        blink = Blink(session=session)
-        if hasattr(blink, "auth"):
-            blink.auth = auth
-        elif hasattr(blink, "_auth"):
-            blink._auth = auth
-        return blink
+    # Follow blinkpy docs path explicitly: construct Blink(session=...), then assign auth.
+    blink = Blink(session=session)
+    if hasattr(blink, "auth"):
+        blink.auth = auth
+    elif hasattr(blink, "_auth"):
+        blink._auth = auth
+    return blink
 
 
 async def _ensure_blink_ready(blink):
