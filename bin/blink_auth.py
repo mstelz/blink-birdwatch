@@ -129,6 +129,37 @@ async def _new_blink(session, auth):
         return blink
 
 
+async def _submit_2fa(auth, blink, code):
+    # blinkpy API differs by version; try known call patterns.
+    errors = []
+
+    for fn in (
+        getattr(auth, "send_auth_key", None),
+        getattr(getattr(blink, "auth", None), "send_auth_key", None),
+        getattr(blink, "send_auth_key", None),
+    ):
+        if fn is None:
+            continue
+
+        # Most common signatures are (blink, code) or (code)
+        try:
+            await fn(blink, code)
+            return
+        except TypeError as e:
+            errors.append(repr(e))
+        except Exception as e:
+            errors.append(repr(e))
+            continue
+
+        try:
+            await fn(code)
+            return
+        except Exception as e:
+            errors.append(repr(e))
+
+    raise RuntimeError("unable to submit 2FA code; compatible send_auth_key API not found: " + "; ".join(errors))
+
+
 async def _attempt_auth(conn, twofa_code=""):
     r = _row(conn)
     username = (r["username"] or "").strip()
@@ -171,8 +202,9 @@ async def _attempt_auth(conn, twofa_code=""):
                     return {"ok": False, "error": "Blink 2FA required", "needs_2fa": True}
 
                 try:
-                    await auth.send_auth_key(blink, twofa_code)
-                    await blink.setup_post_verify()
+                    await _submit_2fa(auth, blink, twofa_code)
+                    if hasattr(blink, "setup_post_verify"):
+                        await blink.setup_post_verify()
                 except Exception as v_exc:
                     _update(
                         conn,
@@ -275,8 +307,9 @@ async def _interactive_login(conn):
                     _print(payload)
                     return
                 try:
-                    await auth.send_auth_key(blink, code)
-                    await blink.setup_post_verify()
+                    await _submit_2fa(auth, blink, code)
+                    if hasattr(blink, "setup_post_verify"):
+                        await blink.setup_post_verify()
                 except Exception as v_exc:
                     _update(
                         conn,
