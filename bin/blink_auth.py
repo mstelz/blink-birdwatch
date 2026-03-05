@@ -14,7 +14,12 @@ import sys
 from aiohttp import ClientSession
 from blinkpy.auth import Auth
 from blinkpy.blinkpy import Blink
-from blinkpy.exceptions import BlinkTwoFARequiredError
+
+try:
+    from blinkpy.exceptions import BlinkTwoFARequiredError
+except Exception:  # blinkpy 0.25.x moved/changed exceptions export
+    class BlinkTwoFARequiredError(Exception):
+        pass
 
 
 def _auth_file():
@@ -27,6 +32,11 @@ def _load_json(path, default):
             return json.load(f)
     except Exception:
         return default
+
+
+def _needs_2fa(err: Exception) -> bool:
+    msg = (str(err) or repr(err)).lower()
+    return "2fa" in msg or "twofa" in msg or "verification" in msg or "auth key" in msg
 
 
 def _status_payload():
@@ -55,7 +65,9 @@ async def _interactive_login():
         blink.auth = Auth({"username": username, "password": password}, no_prompt=True)
         try:
             await blink.start()
-        except BlinkTwoFARequiredError:
+        except Exception as exc:
+            if not _needs_2fa(exc):
+                raise
             await blink.prompt_2fa()
 
         await blink.refresh(force=True)
