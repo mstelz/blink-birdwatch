@@ -96,14 +96,46 @@ def _status_payload():
 
 async def _interactive_login():
     print("Blink interactive login")
+    username = input("Blink username/email: ").strip()
+    password = getpass.getpass("Blink password: ").strip()
+    if not username or not password:
+        print(json.dumps({"ok": False, "error": "username and password are required"}))
+        return 1
 
     auth_file = _auth_file()
+    creds = {"username": username, "password": password}
+    _save_json(auth_file, creds)
+
+    auth = Auth(creds, no_prompt=True)
     session = aiohttp.ClientSession()
-    blink = Blink(session=session)
+    blink = await _new_blink(session, auth)
 
     try:
-        # Native interactive path: blinkpy prompts for username/password and 2FA as needed.
         await blink.start()
+    except Exception as exc:
+        if not _needs_2fa(exc):
+            print(json.dumps({"ok": False, "error": _err_text(exc)}))
+            return 1
+
+        try:
+            # Prefer native interactive prompt if available.
+            if hasattr(blink, "prompt_2fa"):
+                await blink.prompt_2fa()
+            else:
+                code = input("Enter the two-factor authentication code: ").strip()
+                if not code:
+                    raise RuntimeError("2FA code is required")
+                if hasattr(auth, "send_auth_key"):
+                    await auth.send_auth_key(blink, code)
+                else:
+                    raise RuntimeError("blinkpy auth API missing send_auth_key")
+                if hasattr(blink, "setup_post_verify"):
+                    await blink.setup_post_verify()
+        except Exception as twofa_exc:
+            print(json.dumps({"ok": False, "error": _err_text(twofa_exc)}))
+            return 1
+
+    try:
         if hasattr(blink, "refresh"):
             await blink.refresh(force=True)
         await blink.save(auth_file)
@@ -113,7 +145,7 @@ async def _interactive_login():
         print(json.dumps({"ok": False, "error": _err_text(exc)}))
         return 1
     finally:
-        await _cleanup(blink, session)
+        await _cleanup(blink, session, auth)
 
 
 async def _main():
