@@ -57,18 +57,30 @@ async def _new_blink(session, auth):
         return blink
 
 
-async def _cleanup(blink, session):
-    try:
-        bsession = getattr(blink, "session", None) or getattr(blink, "_session", None)
-        if bsession is not None and bsession is not session and not getattr(bsession, "closed", True):
-            await bsession.close()
-    except Exception:
-        pass
-    try:
-        if session is not None and not session.closed:
-            await session.close()
-    except Exception:
-        pass
+async def _cleanup(blink, session, auth=None):
+    candidates = []
+    if session is not None:
+        candidates.append(session)
+
+    for obj in (blink, auth):
+        if obj is None:
+            continue
+        for name in ("session", "_session", "http_session", "_http_session"):
+            s = getattr(obj, name, None)
+            if s is not None:
+                candidates.append(s)
+
+    seen = set()
+    for s in candidates:
+        try:
+            sid = id(s)
+            if sid in seen:
+                continue
+            seen.add(sid)
+            if not getattr(s, "closed", True):
+                await s.close()
+        except Exception:
+            pass
 
 
 def _status_payload():
@@ -118,10 +130,6 @@ async def _interactive_login():
         if callable(setup_fn):
             await setup_fn()
 
-        base_url = getattr(blink, "base_url", None) or getattr(blink, "_base_url", None)
-        if not base_url:
-            raise RuntimeError("Cannot setup Blink platform (base_url missing)")
-
         refresh_fn = getattr(blink, "refresh", None)
         if callable(refresh_fn):
             await refresh_fn(force=True)
@@ -155,7 +163,7 @@ async def _interactive_login():
         print(json.dumps({"ok": False, "error": _err_text(exc)}))
         return 1
     finally:
-        await _cleanup(blink, session)
+        await _cleanup(blink, session, auth)
 
 
 async def _main():
