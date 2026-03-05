@@ -166,9 +166,7 @@ async function pollBlinkFetchCommand() {
       }
     }
 
-    if (parsed.length > 0) {
-      console.log(`[bridge] blink fetch command returned ${parsed.length} event(s), added ${added}`);
-    }
+    console.log(`[bridge] blink fetch poll ran: returned ${parsed.length} event(s), added ${added}`);
   } catch (err) {
     console.error(`[bridge] BLINK_FETCH_COMMAND failed: ${err.message}`);
   }
