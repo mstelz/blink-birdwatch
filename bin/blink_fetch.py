@@ -103,93 +103,117 @@ async def _main():
     seen = set(state.get("seen") or [])
     events = []
 
-    auth = Auth(creds, no_prompt=True)
-    session = aiohttp.ClientSession()
-    blink = await _new_blink(session, auth)
+    timeout = aiohttp.ClientTimeout(total=60)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        auth = Auth(creds, no_prompt=True)
+        # blinkpy's Auth may create its own aiohttp session if not provided; force reuse
+        # our session to avoid "Unclosed client session" warnings.
+        if hasattr(auth, "session"):
+            auth.session = session
 
-    try:
-        await blink.start()
-        await blink.refresh(force=True)
+        blink = await _new_blink(session, auth)
 
-        include = set(name.strip().lower() for name in camera_filter.split(",") if name.strip())
+        try:
+            await blink.start()
+            await blink.refresh(force=True)
 
-        os.makedirs(download_dir, exist_ok=True)
-        since_iso = state.get("lastDownloadSince") or state.get("updatedAt") or _utc_now()
-        since_arg = _to_download_since(since_iso)
+            include = set(name.strip().lower() for name in camera_filter.split(",") if name.strip())
 
-        used_download = False
-        if hasattr(blink, "download_videos"):
-            try:
-                await blink.download_videos(download_dir, since=since_arg, delay=2)
-                used_download = True
-            except Exception as dl_exc:
-                print(f"[blink-fetch] download_videos failed, falling back to recent_clips: {_err_text(dl_exc)}", file=sys.stderr)
+            os.makedirs(download_dir, exist_ok=True)
+            since_iso = state.get("lastDownloadSince") or state.get("updatedAt") or _utc_now()
+            since_arg = _to_download_since(since_iso)
 
-        if used_download:
-            for fpath in sorted(glob.glob(os.path.join(download_dir, "**", "*.mp4"), recursive=True)):
+            used_download = False
+            if hasattr(blink, "download_videos"):
                 try:
-                    st = os.stat(fpath)
-                except Exception:
-                    continue
-                ts = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
-                event_id = _event_id("download", ts, fpath)
-                if event_id in seen:
-                    continue
-                events.append(
-                    {
-                        "id": event_id,
-                        "timestamp": ts,
-                        "mediaUrl": None,
-                        "localFile": fpath,
-                        "thumbnailUrl": None,
-                        "source": "blink",
-                        "camera": "download",
-                    }
-                )
-        else:
-            for camera_name, camera in blink.cameras.items():
-                if include and camera_name.lower() not in include:
-                    continue
+                    await blink.download_videos(download_dir, since=since_arg, delay=2)
+                    used_download = True
+                except Exception as dl_exc:
+                    print(
+                        f"[blink-fetch] download_videos failed, falling back to recent_clips: {_err_text(dl_exc)}",
+                        file=sys.stderr,
+                    )
 
-                recent = list(camera.recent_clips or [])
-                for clip in recent:
-                    clip_url = clip.get("clip")
-                    clip_time = clip.get("time") or _utc_now()
-                    if not clip_url:
+            if used_download:
+                for fpath in sorted(
+                    glob.glob(os.path.join(download_dir, "**", "*.mp4"), recursive=True)
+                ):
+                    try:
+                        st = os.stat(fpath)
+                    except Exception:
                         continue
-
-                    event_id = _event_id(camera_name, clip_time, clip_url)
+                    ts = (
+                        datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+                    event_id = _event_id("download", ts, fpath)
                     if event_id in seen:
                         continue
-
                     events.append(
                         {
                             "id": event_id,
-                            "timestamp": clip_time,
-                            "mediaUrl": clip_url,
-                            "thumbnailUrl": camera.thumbnail,
+                            "timestamp": ts,
+                            "mediaUrl": None,
+                            "localFile": fpath,
+                            "thumbnailUrl": None,
                             "source": "blink",
-                            "camera": camera_name,
+                            "camera": "download",
                         }
                     )
+            else:
+                for camera_name, camera in blink.cameras.items():
+                    if include and camera_name.lower() not in include:
+                        continue
 
-        events.sort(key=lambda e: e.get("timestamp") or "")
-        if max_events > 0:
-            events = events[-max_events:]
+                    recent = list(camera.recent_clips or [])
+                    for clip in recent:
+                        clip_url = clip.get("clip")
+                        clip_time = clip.get("time") or _utc_now()
+                        if not clip_url:
+                            continue
 
-        for ev in events:
-            seen.add(ev["id"])
+                        event_id = _event_id(camera_name, clip_time, clip_url)
+                        if event_id in seen:
+                            continue
 
-        now_iso = _utc_now()
-        _save_json(state_file, {"seen": list(seen)[-1000:], "updatedAt": now_iso, "lastDownloadSince": now_iso})
+                        events.append(
+                            {
+                                "id": event_id,
+                                "timestamp": clip_time,
+                                "mediaUrl": clip_url,
+                                "thumbnailUrl": camera.thumbnail,
+                                "source": "blink",
+                                "camera": camera_name,
+                            }
+                        )
 
-        await blink.save(auth_file)
-        print(json.dumps(events))
-    except Exception as exc:
-        print(f"[blink-fetch] {_err_text(exc)}", file=sys.stderr)
-        print("[]")
-    finally:
-        await _cleanup(blink, session)
+            events.sort(key=lambda e: e.get("timestamp") or "")
+            if max_events > 0:
+                events = events[-max_events:]
+
+            for ev in events:
+                seen.add(ev["id"])
+
+            now_iso = _utc_now()
+            _save_json(
+                state_file,
+                {"seen": list(seen)[-1000:], "updatedAt": now_iso, "lastDownloadSince": now_iso},
+            )
+
+            await blink.save(auth_file)
+            print(json.dumps(events))
+        except Exception as exc:
+            print(f"[blink-fetch] {_err_text(exc)}", file=sys.stderr)
+            print("[]")
+        finally:
+            # Close any blinkpy-created session if it didn't reuse ours.
+            try:
+                bsession = getattr(blink, "session", None) or getattr(blink, "_session", None)
+                if bsession is not None and bsession is not session and not getattr(bsession, "closed", True):
+                    await bsession.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
