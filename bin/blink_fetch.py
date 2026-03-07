@@ -89,11 +89,21 @@ async def _main():
     camera_filter = os.getenv("BLINK_CAMERA_NAMES", "").strip()
     max_events = int(os.getenv("BLINK_FETCH_MAX_EVENTS", "25") or "25")
     download_dir = os.getenv("BLINK_DOWNLOAD_DIR", "/app/work/blink-downloads").strip()
+    debug = (os.getenv("BLINK_FETCH_DEBUG", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+    def dlog(msg: str):
+        if debug:
+            print(f"[blink-fetch] {msg}", file=sys.stderr)
 
     creds = _load_json(auth_file, {})
     # Prefer token-based operation: after `blink login`, blinkpy may persist tokens but not the raw password.
     # We only require a valid token set to proceed.
     has_tokens = bool(creds.get("access_token") or creds.get("refresh_token") or creds.get("account_id"))
+    if debug:
+        dlog(
+            f"auth_file={auth_file} has_tokens={has_tokens} has_username={bool((creds.get('username') or '').strip())} "
+            f"has_password={bool((creds.get('password') or '').strip())}"
+        )
     if not has_tokens:
         print("[blink-fetch] missing tokens in BLINK_AUTH_FILE; run: blink login", file=sys.stderr)
         print("[]")
@@ -102,6 +112,11 @@ async def _main():
     state = _load_json(state_file, {"seen": []})
     seen = set(state.get("seen") or [])
     events = []
+
+    if debug:
+        dlog(
+            f"state_file={state_file} seen={len(seen)} lastDownloadSince={state.get('lastDownloadSince')} updatedAt={state.get('updatedAt')}"
+        )
 
     timeout = aiohttp.ClientTimeout(total=60)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -114,32 +129,46 @@ async def _main():
         blink = await _new_blink(session, auth)
 
         try:
+            dlog("starting blink session")
             await blink.start()
+            dlog("refreshing blink")
             await blink.refresh(force=True)
 
             include = set(name.strip().lower() for name in camera_filter.split(",") if name.strip())
+            dlog(f"camera_filter={camera_filter!r} include={sorted(include)}")
 
             os.makedirs(download_dir, exist_ok=True)
+            dlog(f"download_dir={download_dir}")
             # If we've never run before, pull a small backlog (default handled by _to_download_since)
             # instead of "since now", which would always yield 0 events on first run.
             since_iso = state.get("lastDownloadSince") or state.get("updatedAt")
             since_arg = _to_download_since(since_iso)
+            dlog(f"since_iso={since_iso!r} since_arg={since_arg!r}")
 
             used_download = False
             if hasattr(blink, "download_videos"):
                 try:
+                    dlog("attempting blink.download_videos")
                     await blink.download_videos(download_dir, since=since_arg, delay=2)
                     used_download = True
+                    dlog("download_videos completed")
                 except Exception as dl_exc:
                     print(
                         f"[blink-fetch] download_videos failed, falling back to recent_clips: {_err_text(dl_exc)}",
                         file=sys.stderr,
                     )
+                    dlog(f"download_videos failed: {_err_text(dl_exc)}")
+            else:
+                dlog("blink.download_videos not available; using recent_clips")
 
             if used_download:
-                for fpath in sorted(
-                    glob.glob(os.path.join(download_dir, "**", "*.mp4"), recursive=True)
-                ):
+                patterns = ["*.mp4", "*.m4v", "*.mov"]
+                files = []
+                for pat in patterns:
+                    files.extend(glob.glob(os.path.join(download_dir, "**", pat), recursive=True))
+                dlog(f"download scan patterns={patterns} files_found={len(files)}")
+
+                for fpath in sorted(set(files)):
                     try:
                         st = os.stat(fpath)
                     except Exception:
@@ -164,11 +193,18 @@ async def _main():
                         }
                     )
             else:
+                try:
+                    cam_names = list((blink.cameras or {}).keys())
+                except Exception:
+                    cam_names = []
+                dlog(f"cameras={len(cam_names)} names={cam_names}")
+
                 for camera_name, camera in blink.cameras.items():
                     if include and camera_name.lower() not in include:
                         continue
 
                     recent = list(camera.recent_clips or [])
+                    dlog(f"camera={camera_name} recent_clips={len(recent)}")
                     for clip in recent:
                         clip_url = clip.get("clip")
                         clip_time = clip.get("time") or _utc_now()
@@ -203,6 +239,7 @@ async def _main():
                 {"seen": list(seen)[-1000:], "updatedAt": now_iso, "lastDownloadSince": now_iso},
             )
 
+            dlog(f"events_found={len(events)} (before max_events trim)")
             await blink.save(auth_file)
             print(json.dumps(events))
         except Exception as exc:
