@@ -120,7 +120,9 @@ async def _main():
             include = set(name.strip().lower() for name in camera_filter.split(",") if name.strip())
 
             os.makedirs(download_dir, exist_ok=True)
-            since_iso = state.get("lastDownloadSince") or state.get("updatedAt") or _utc_now()
+            # If we've never run before, pull a small backlog (default handled by _to_download_since)
+            # instead of "since now", which would always yield 0 events on first run.
+            since_iso = state.get("lastDownloadSince") or state.get("updatedAt")
             since_arg = _to_download_since(since_iso)
 
             used_download = False
