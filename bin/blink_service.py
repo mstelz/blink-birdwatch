@@ -136,7 +136,9 @@ class BridgeService:
 
             self.dlog(f"extract wav {mp4_path} -> {wav_tmp}")
             await self._extract_wav(mp4_path, wav_tmp)
-            wav_tmp.replace(wav_out)
+            # wav_tmp and wav_out may be on different filesystems (e.g., separate Docker bind mounts).
+            # Path.replace() uses os.rename() which fails cross-device with EXDEV.
+            shutil.move(str(wav_tmp), str(wav_out))
             print(f"[bridge] emitted {wav_out.name}")
             await self.mark_done(event_id, True)
             return True, None
