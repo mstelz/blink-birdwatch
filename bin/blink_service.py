@@ -33,6 +33,7 @@ class Config:
     fetch_command = os.getenv("BLINK_FETCH_COMMAND", "python3 /app/bin/blink_fetch.py").strip()
     seen_ids_file = Path(os.getenv("SEEN_IDS_FILE", "./work/.seen-motion-ids.json"))
     max_seen_ids = int(os.getenv("MAX_SEEN_IDS", "10000") or "10000")
+    debug = (os.getenv("BRIDGE_DEBUG", "") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 class BridgeService:
@@ -43,6 +44,10 @@ class BridgeService:
         self.seen_set: set[str] = set()
         self.processing: set[str] = set()
         self.poll_task: asyncio.Task | None = None
+
+    def dlog(self, msg: str) -> None:
+        if self.cfg.debug:
+            print(f"[bridge][debug] {msg}")
 
     def load_seen_ids(self) -> None:
         path = self.cfg.seen_ids_file
@@ -101,8 +106,11 @@ class BridgeService:
         if not isinstance(event_id, str) or not event_id:
             return False, "id is required"
 
+        self.dlog(f"process_event id={event_id} keys={sorted(list(event.keys()))}")
+
         admitted = await self.add_seen(event_id)
         if not admitted:
+            self.dlog(f"skip duplicate/inflight id={event_id}")
             return True, None
 
         media_url = event.get("mediaUrl")
@@ -120,10 +128,13 @@ class BridgeService:
 
         try:
             if local_file:
+                self.dlog(f"copy local_file={local_file} -> {mp4_path}")
                 shutil.copy2(local_file, mp4_path)
             else:
+                self.dlog(f"download mediaUrl={media_url} -> {mp4_path}")
                 await self._download_file(str(media_url), mp4_path)
 
+            self.dlog(f"extract wav {mp4_path} -> {wav_tmp}")
             await self._extract_wav(mp4_path, wav_tmp)
             wav_tmp.replace(wav_out)
             print(f"[bridge] emitted {wav_out.name}")
@@ -131,6 +142,7 @@ class BridgeService:
             return True, None
         except Exception as exc:
             await self.mark_done(event_id, False)
+            print(f"[bridge] failed id={event_id}: {exc}")
             return False, str(exc)
         finally:
             for p in (mp4_path, wav_tmp):
@@ -184,11 +196,16 @@ class BridgeService:
             try:
                 events = await self.run_fetch_command()
                 emitted = 0
+                failed = 0
                 for ev in events:
                     ok, err = await self.process_event(ev)
                     if ok and not err:
                         emitted += 1
-                print(f"[bridge] poll complete events={len(events)} emitted={emitted}")
+                    else:
+                        failed += 1
+                        if err:
+                            self.dlog(f"event failed: ok={ok} err={err}")
+                print(f"[bridge] poll complete events={len(events)} emitted={emitted} failed={failed}")
             except Exception as exc:
                 print(f"[bridge] poll failed: {exc}")
             await asyncio.sleep(max(5, self.cfg.blink_poll_interval_sec))
