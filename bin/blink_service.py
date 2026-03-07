@@ -35,6 +35,9 @@ class Config:
     max_seen_ids = int(os.getenv("MAX_SEEN_IDS", "10000") or "10000")
     debug = (os.getenv("BRIDGE_DEBUG", "") or "").strip().lower() in ("1", "true", "yes", "on")
 
+    # If an event comes from the downloaded mp4 folder, optionally delete the mp4 after successful processing.
+    cleanup_mp4 = (os.getenv("CLEANUP_MP4", "") or "").strip().lower() in ("1", "true", "yes", "on")
+    download_dir = Path(os.getenv("BLINK_DOWNLOAD_DIR", str(work_dir / "blink-downloads"))).resolve()
 
 class BridgeService:
     def __init__(self, cfg: Config):
@@ -140,6 +143,17 @@ class BridgeService:
             # Path.replace() uses os.rename() which fails cross-device with EXDEV.
             shutil.move(str(wav_tmp), str(wav_out))
             print(f"[bridge] emitted {wav_out.name}")
+
+            # Optionally clean up downloaded source mp4s to save space.
+            if self.cfg.cleanup_mp4 and local_file:
+                try:
+                    src = Path(local_file).resolve()
+                    if self.cfg.download_dir in src.parents:
+                        src.unlink(missing_ok=True)
+                        self.dlog(f"cleaned up source mp4 {src}")
+                except Exception as cleanup_exc:
+                    self.dlog(f"cleanup mp4 failed: {cleanup_exc}")
+
             await self.mark_done(event_id, True)
             return True, None
         except Exception as exc:

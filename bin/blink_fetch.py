@@ -164,12 +164,27 @@ async def _main():
             dlog(f"since_iso={since_iso!r} since_arg={since_arg!r} lookback_sec={lookback_sec}")
 
             used_download = False
+            new_files: set[str] = set()
             if hasattr(blink, "download_videos"):
                 try:
                     dlog("attempting blink.download_videos")
+                    # Snapshot before/after so we can emit events only for newly downloaded files.
+                    before: set[str] = set(
+                        os.path.abspath(p)
+                        for p in glob.glob(os.path.join(download_dir, "**", "*.mp4"), recursive=True)
+                        + glob.glob(os.path.join(download_dir, "**", "*.m4v"), recursive=True)
+                        + glob.glob(os.path.join(download_dir, "**", "*.mov"), recursive=True)
+                    )
                     await blink.download_videos(download_dir, since=since_arg, delay=2)
+                    after: set[str] = set(
+                        os.path.abspath(p)
+                        for p in glob.glob(os.path.join(download_dir, "**", "*.mp4"), recursive=True)
+                        + glob.glob(os.path.join(download_dir, "**", "*.m4v"), recursive=True)
+                        + glob.glob(os.path.join(download_dir, "**", "*.mov"), recursive=True)
+                    )
+                    new_files = after - before
                     used_download = True
-                    dlog("download_videos completed")
+                    dlog(f"download_videos completed new_files={len(new_files)}")
                 except Exception as dl_exc:
                     print(
                         f"[blink-fetch] download_videos failed, falling back to recent_clips: {_err_text(dl_exc)}",
@@ -181,12 +196,17 @@ async def _main():
 
             if used_download:
                 patterns = ["*.mp4", "*.m4v", "*.mov"]
-                files = []
-                for pat in patterns:
-                    files.extend(glob.glob(os.path.join(download_dir, "**", pat), recursive=True))
+                # If download_videos ran, prefer emitting events only for newly created files.
+                files = sorted(new_files) if new_files else []
+                if not files:
+                    # Fall back to scanning (useful if blinkpy overwrote files without changing names).
+                    scan = []
+                    for pat in patterns:
+                        scan.extend(glob.glob(os.path.join(download_dir, "**", pat), recursive=True))
+                    files = sorted(set(scan))
                 dlog(f"download scan patterns={patterns} files_found={len(files)}")
 
-                for fpath in sorted(set(files)):
+                for fpath in files:
                     try:
                         st = os.stat(fpath)
                     except Exception:
