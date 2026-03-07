@@ -51,11 +51,16 @@ def _err_text(err: Exception) -> str:
     return msg or repr(err)
 
 
-def _to_download_since(iso_ts):
+def _to_download_since(iso_ts, lookback_sec: int | None = None):
+    """Convert ISO timestamp (or fallback lookback) to blinkpy since format.
+
+    If iso_ts is missing/invalid, falls back to now - lookback_sec (or 24h).
+    """
     try:
         dt = datetime.fromisoformat((iso_ts or "").replace("Z", "+00:00"))
     except Exception:
-        dt = datetime.now(timezone.utc) - timedelta(hours=24)
+        lb = lookback_sec if (lookback_sec is not None and lookback_sec > 0) else 24 * 3600
+        dt = datetime.now(timezone.utc) - timedelta(seconds=lb)
     return dt.astimezone(timezone.utc).strftime("%Y/%m/%d %H:%M")
 
 
@@ -90,6 +95,7 @@ async def _main():
     max_events = int(os.getenv("BLINK_FETCH_MAX_EVENTS", "25") or "25")
     download_dir = os.getenv("BLINK_DOWNLOAD_DIR", "/app/work/blink-downloads").strip()
     debug = (os.getenv("BLINK_FETCH_DEBUG", "") or "").strip().lower() in ("1", "true", "yes", "on")
+    lookback_sec = int(os.getenv("BLINK_FETCH_LOOKBACK_SEC", "0") or "0")
 
     def dlog(msg: str):
         if debug:
@@ -142,8 +148,8 @@ async def _main():
             # If we've never run before, pull a small backlog (default handled by _to_download_since)
             # instead of "since now", which would always yield 0 events on first run.
             since_iso = state.get("lastDownloadSince") or state.get("updatedAt")
-            since_arg = _to_download_since(since_iso)
-            dlog(f"since_iso={since_iso!r} since_arg={since_arg!r}")
+            since_arg = _to_download_since(since_iso, lookback_sec=lookback_sec)
+            dlog(f"since_iso={since_iso!r} since_arg={since_arg!r} lookback_sec={lookback_sec}")
 
             used_download = False
             if hasattr(blink, "download_videos"):
@@ -233,13 +239,22 @@ async def _main():
             for ev in events:
                 seen.add(ev["id"])
 
+            # Strategy A:
+            # - Always update updatedAt
+            # - Only advance lastDownloadSince when we actually observed new events
+            #   (prevents "chasing now" and missing backlog when polls return 0)
             now_iso = _utc_now()
+            last_since = state.get("lastDownloadSince") or state.get("updatedAt")
+            if events:
+                # Use the newest event timestamp if available, else now.
+                newest_ts = (events[-1].get("timestamp") or "").strip()
+                last_since = newest_ts or now_iso
             _save_json(
                 state_file,
-                {"seen": list(seen)[-1000:], "updatedAt": now_iso, "lastDownloadSince": now_iso},
+                {"seen": list(seen)[-1000:], "updatedAt": now_iso, "lastDownloadSince": last_since},
             )
 
-            dlog(f"events_found={len(events)} (before max_events trim)")
+            dlog(f"events_found={len(events)} (before max_events trim) next_lastDownloadSince={last_since}")
             await blink.save(auth_file)
             print(json.dumps(events))
         except Exception as exc:
