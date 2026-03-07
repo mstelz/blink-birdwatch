@@ -14,6 +14,7 @@ import asyncio
 import glob
 import hashlib
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -96,10 +97,21 @@ async def _main():
     download_dir = os.getenv("BLINK_DOWNLOAD_DIR", "/app/work/blink-downloads").strip()
     debug = (os.getenv("BLINK_FETCH_DEBUG", "") or "").strip().lower() in ("1", "true", "yes", "on")
     lookback_sec = int(os.getenv("BLINK_FETCH_LOOKBACK_SEC", "0") or "0")
+    blinkpy_debug = (os.getenv("BLINKPY_DEBUG", "") or "").strip().lower() in ("1", "true", "yes", "on")
+    aiohttp_debug = (os.getenv("AIOHTTP_DEBUG", "") or "").strip().lower() in ("1", "true", "yes", "on")
 
     def dlog(msg: str):
         if debug:
             print(f"[blink-fetch] {msg}", file=sys.stderr)
+
+    if blinkpy_debug:
+        logging.basicConfig(level=logging.DEBUG, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
+        # Make sure blinkpy logs are visible even if root logger is configured elsewhere.
+        logging.getLogger("blinkpy").setLevel(logging.DEBUG)
+        if aiohttp_debug:
+            logging.getLogger("aiohttp.client").setLevel(logging.DEBUG)
+            logging.getLogger("aiohttp.connector").setLevel(logging.DEBUG)
+        dlog(f"enabled blinkpy debug (aiohttp_debug={aiohttp_debug})")
 
     creds = _load_json(auth_file, {})
     # Prefer token-based operation: after `blink login`, blinkpy may persist tokens but not the raw password.
