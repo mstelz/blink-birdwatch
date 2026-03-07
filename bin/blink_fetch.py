@@ -91,10 +91,11 @@ async def _main():
     download_dir = os.getenv("BLINK_DOWNLOAD_DIR", "/app/work/blink-downloads").strip()
 
     creds = _load_json(auth_file, {})
-    username = (creds.get("username") or "").strip()
-    password = (creds.get("password") or "").strip()
-    if not username or not password:
-        print("[blink-fetch] missing username/password in BLINK_AUTH_FILE; run: blink login", file=sys.stderr)
+    # Prefer token-based operation: after `blink login`, blinkpy may persist tokens but not the raw password.
+    # We only require a valid token set to proceed.
+    has_tokens = bool(creds.get("access_token") or creds.get("refresh_token") or creds.get("account_id"))
+    if not has_tokens:
+        print("[blink-fetch] missing tokens in BLINK_AUTH_FILE; run: blink login", file=sys.stderr)
         print("[]")
         return
 
