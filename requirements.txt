@@ -1,2 +1,2 @@
 aiohttp>=3.10,<4
-blinkpy==0.24.1
+blinkpy==0.25.5

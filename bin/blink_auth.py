@@ -8,11 +8,13 @@ Commands:
 
 import asyncio
 import json
+import logging
 import os
 import sys
 
 from aiohttp import ClientSession
 from blinkpy.blinkpy import Blink
+from blinkpy.auth import BlinkTwoFARequiredError
 
 
 def _auth_file():
@@ -40,13 +42,65 @@ def _status_payload():
     }
 
 
-async def _interactive_login():
+async def _patched_oauth_signin(auth, email, password, csrf_token):
+    """Wrap blinkpy's oauth_signin to surface 429 rate-limit errors clearly."""
+    from blinkpy import api as blink_api
+    from blinkpy.api import OAUTH_USER_AGENT, OAUTH_SIGNIN_URL
+
+    headers = {
+        "User-Agent": OAUTH_USER_AGENT,
+        "Accept": "*/*",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://api.oauth.blink.com",
+        "Referer": OAUTH_SIGNIN_URL,
+    }
+    data = {
+        "username": email,
+        "password": password,
+        "csrf-token": csrf_token,
+    }
+    response = await auth.session.post(
+        OAUTH_SIGNIN_URL, headers=headers, data=data, allow_redirects=False
+    )
+    if response.status == 429:
+        body = await response.json(content_type=None)
+        cause = body.get("error_cause", "")
+        wait = body.get("next_time_in_secs", 0)
+        hours = round(wait / 3600, 1)
+        msg = body.get("error_description", "rate limit exceeded")
+        raise RuntimeError(
+            f"Blink login blocked: {msg}"
+            + (f" Try again in {hours}h." if hours else "")
+            + (f" (cause: {cause})" if cause else "")
+        )
+    if response.status == 412:
+        return "2FA_REQUIRED"
+    if response.status in (301, 302, 303, 307, 308):
+        return "SUCCESS"
+    return None
+
+
+async def _interactive_login(debug=False):
+    if debug:
+        logging.basicConfig(level=logging.DEBUG, stream=sys.stderr,
+                            format="%(levelname)s %(name)s: %(message)s")
+    import blinkpy.api as blink_api
+    blink_api.oauth_signin = _patched_oauth_signin
+
     auth_file = _auth_file()
     async with ClientSession() as session:
         blink = Blink(session=session)
-        await blink.start()  # native interactive prompt flow (username/password/2FA)
-        if hasattr(blink, "refresh"):
-            await blink.refresh(force=True)
+        try:
+            started = await blink.start()
+        except BlinkTwoFARequiredError:
+            await blink.prompt_2fa()  # prompts interactively, then calls start() again
+            started = True
+
+        if not started:
+            raise RuntimeError(
+                "Blink login failed — check your username/password, or run with --debug for details"
+            )
+
         await blink.save(auth_file)
 
     print(json.dumps(_status_payload()))
@@ -61,8 +115,9 @@ async def _main():
         return 0
 
     if cmd == "login":
+        debug = "--debug" in sys.argv
         try:
-            return await _interactive_login()
+            return await _interactive_login(debug=debug)
         except Exception as exc:
             print(json.dumps({"ok": False, "error": str(exc) or repr(exc)}))
             return 1

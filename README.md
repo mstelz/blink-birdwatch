@@ -30,7 +30,7 @@ docker compose up -d --build
 
 ## Blink auth (one-time)
 
-Auth is file-only (no SQLite).
+Auth is file-only (no SQLite). Uses Blink's OAuth v2 flow — you will be prompted for your Blink username and password, then a 2FA code sent to your email or phone.
 
 ```bash
 docker exec -it blink-bridge blink login
@@ -45,6 +45,15 @@ docker exec -it blink-bridge blink status
 ```
 
 If auth expires, rerun `blink login`.
+
+**Troubleshooting:**
+
+- Add `--debug` to see verbose OAuth flow output:
+  ```bash
+  docker exec -it blink-bridge blink login --debug
+  ```
+- If you see `2FA rate limit exceeded`, Blink has temporarily blocked your account due to too many login attempts. Wait 24 hours and try again.
+- Ensure your Blink account has 2FA enabled — the OAuth flow requires it.
 
 ## Env
 
