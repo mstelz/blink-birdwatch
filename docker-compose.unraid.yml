@@ -25,7 +25,7 @@ services:
       - TZ=${TZ:-America/Chicago}
       - BIRDNET_UID=${BIRDNET_UID:-99}
       - BIRDNET_GID=${BIRDNET_GID:-100}
-    command: ["birdnet-go", "directory", "/blink-processed", "--watch", "--recursive", "--output", "/birdnet-output"]
+    command: ["birdnet-go", "directory", "/blink-processed", "--watch", "--recursive", "--output", "/birdnet-output", "--type", "csv"]
     volumes:
       - ${BIRDNET_CONFIG_DIR:-./birdnet-go/config}:/config
       - ${BIRDNET_DATA_DIR:-./birdnet-go/data}:/data
