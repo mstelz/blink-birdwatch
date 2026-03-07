@@ -14,7 +14,12 @@ import sys
 
 from aiohttp import ClientSession
 from blinkpy.blinkpy import Blink
-from blinkpy.auth import BlinkTwoFARequiredError
+
+# blinkpy moved this exception between versions; support both.
+try:
+    from blinkpy.auth import BlinkTwoFARequiredError  # type: ignore
+except Exception:  # pragma: no cover
+    from blinkpy.exceptions import BlinkTwoFARequiredError  # type: ignore
 
 
 def _auth_file():
