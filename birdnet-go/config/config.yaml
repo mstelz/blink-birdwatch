@@ -1,0 +1,23 @@
+# BirdNET-Go config (minimal defaults for BirdWatch)
+# This file is mounted into the BirdNET-Go UI + worker containers at /config/config.yaml
+# Goal: make detections persist into the UI database (SQLite), not just report files.
+
+# You can tune these later in the UI.
+debug: false
+
+birdnet:
+  # Keep conservative defaults; adjust in UI if you want more/less detections.
+  threshold: 0.8
+  sensitivity: 1.0
+
+# Persist detections to a DB that the UI can read.
+# NOTE: This is the key bit for "UI shows detections".
+output:
+  sqlite:
+    enabled: true
+    # Explicitly place the DB under /data (which is a persistent volume mount in our compose).
+    path: /data/birdnet.db
+
+  # Leave MySQL disabled unless you intentionally run a DB.
+  mysql:
+    enabled: false

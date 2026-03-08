@@ -11,7 +11,13 @@ __pycache__/
 data/
 work/
 output/
-birdnet-go/
+# BirdNET-Go persistence and config
+# - keep data out of git
+# - keep a default config template in git
+birdnet-go/data/
+# allow committing birdnet-go/config/*
+!birdnet-go/config/
+!birdnet-go/config/**
 
 # Local config (contains local URLs/IPs/tokens)
 config/blink-events.json
