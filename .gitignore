@@ -11,6 +11,10 @@ __pycache__/
 data/
 work/
 output/
+.local/
+birdnet-output/
+docker-compose.localtest.yml
+birdnet-go/config/.system_id
 # BirdNET-Go persistence and config
 # - keep data out of git
 # - keep a default config template in git
