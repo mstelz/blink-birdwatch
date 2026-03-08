@@ -49,17 +49,15 @@ services:
   # Sidecar: imports BirdNET-Go CSV outputs into the SQLite DB the UI reads.
   # This keeps the UI populated even when the worker runs in `directory --type csv` mode.
   db-importer:
-    image: python:3.12-slim
+    image: ghcr.io/mstelz/blink-birdwatch-db-importer:${BIRDNET_IMPORTER_TAG:-v0.1.26}
     container_name: birdnet-db-importer
     restart: unless-stopped
     environment:
       - TZ=${TZ:-America/Chicago}
+      - DB_PATH=/data/birdnet.db
+      - CSV_DIR=/birdnet-output
+      - IMPORT_TZ=${TZ:-America/Chicago}
+      - INTERVAL_SEC=${IMPORT_INTERVAL_SEC:-10}
     volumes:
-      - ./bin/import_birdnet_csv_to_sqlite.py:/app/import.py:ro
       - ${BIRDNET_DATA_DIR:-./birdnet-go/data}:/data
       - ${BIRDNET_RESULT_DIR:-./birdnet-output}:/birdnet-output
-    command: >
-      sh -lc 'while true; do
-        python /app/import.py --db /data/birdnet.db --csv-dir /birdnet-output --tz "${TZ:-America/Chicago}" || true;
-        sleep 10;
-      done'
