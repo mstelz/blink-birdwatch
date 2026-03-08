@@ -61,3 +61,28 @@ services:
     volumes:
       - ${BIRDNET_DATA_DIR:-./birdnet-go/data}:/data
       - ${BIRDNET_RESULT_DIR:-./birdnet-output}:/birdnet-output
+
+  # BlinkBridge (RTSP) add-on (optional)
+  # - Provides RTSP streams via MediaMTX from Blink motion clips.
+  # - Useful for adding RTSP sources directly inside BirdNET-Go UI.
+  #
+  # Setup:
+  # 1) Create config.json in BLINKBRIDGE_CONFIG_DIR (see: https://github.com/roger-/blinkbridge)
+  # 2) Run once to enter Blink verification code (creates .cred.json), then `up -d`.
+  mediamtx:
+    image: bluenviron/mediamtx
+    container_name: mediamtx
+    restart: unless-stopped
+    ports:
+      - "${MEDIA_MTX_RTSP_PORT:-8554}:8554"
+
+  blinkbridge:
+    image: rogerdammit/blinkbridge
+    container_name: blinkbridge
+    restart: unless-stopped
+    tty: true
+    environment:
+      - BLINKBRIDGE_CONFIG=/config/config.json
+    volumes:
+      - ${BLINKBRIDGE_CONFIG_DIR:-/mnt/user/appdata/blinkbridge/config}:/config
+      - ${BLINKBRIDGE_WORKING_DIR:-/mnt/user/appdata/blinkbridge/working}:/working
