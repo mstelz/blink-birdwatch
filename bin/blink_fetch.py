@@ -138,11 +138,9 @@ async def _main():
 
     timeout = aiohttp.ClientTimeout(total=60)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        auth = Auth(creds, no_prompt=True)
-        # blinkpy's Auth may create its own aiohttp session if not provided; force reuse
-        # our session to avoid "Unclosed client session" warnings.
-        if hasattr(auth, "session"):
-            auth.session = session
+        # Pass the aiohttp session into Auth so blinkpy doesn't create its own.
+        # This prevents "Unclosed client session" warnings.
+        auth = Auth(creds, no_prompt=True, session=session)
 
         blink = await _new_blink(session, auth)
 
@@ -294,6 +292,7 @@ async def _main():
             print("[]")
         finally:
             # Close any blinkpy-created session if it didn't reuse ours.
+            # With Auth(..., session=session) this should be a no-op.
             try:
                 bsession = getattr(blink, "session", None) or getattr(blink, "_session", None)
                 if bsession is not None and bsession is not session and not getattr(bsession, "closed", True):
