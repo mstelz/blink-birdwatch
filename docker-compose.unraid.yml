@@ -34,7 +34,7 @@ services:
 
   # Blink motion -> WAV bridge
   blink-bridge:
-    image: ghcr.io/mstelz/blink-birdwatch:latest
+    image: ghcr.io/mstelz/birdwatch:latest
     container_name: blink-bridge
     restart: unless-stopped
     ports:
