@@ -14,6 +14,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   IMPORTER_IMAGE_NAME: ${{ github.repository }}-db-importer
+  RTSP_IMAGE_NAME: ${{ github.repository }}-rtsp-publisher
 
 jobs:
   build:
@@ -79,5 +80,28 @@ jobs:
           push: true
           tags: ${{ steps.meta_importer.outputs.tags }}
           labels: ${{ steps.meta_importer.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # RTSP publisher image
+      - name: Extract metadata (rtsp-publisher)
+        id: meta_rtsp
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.RTSP_IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
+
+      - name: Build and push (rtsp-publisher)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.rtsp-publisher
+          push: true
+          tags: ${{ steps.meta_rtsp.outputs.tags }}
+          labels: ${{ steps.meta_rtsp.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

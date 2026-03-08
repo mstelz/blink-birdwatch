@@ -62,13 +62,7 @@ services:
       - ${BIRDNET_DATA_DIR:-./birdnet-go/data}:/data
       - ${BIRDNET_RESULT_DIR:-./birdnet-output}:/birdnet-output
 
-  # BlinkBridge (RTSP) add-on (optional)
-  # - Provides RTSP streams via MediaMTX from Blink motion clips.
-  # - Useful for adding RTSP sources directly inside BirdNET-Go UI.
-  #
-  # Setup:
-  # 1) Create config.json in BLINKBRIDGE_CONFIG_DIR (see: https://github.com/roger-/blinkbridge)
-  # 2) Run once to enter Blink verification code (creates .cred.json), then `up -d`.
+  # MediaMTX (RTSP server)
   mediamtx:
     image: bluenviron/mediamtx
     container_name: mediamtx
@@ -76,13 +70,21 @@ services:
     ports:
       - "${MEDIA_MTX_RTSP_PORT:-8554}:8554"
 
-  blinkbridge:
-    image: rogerdammit/blinkbridge
-    container_name: blinkbridge
+  # BirdWatch RTSP publisher (recommended)
+  # Publishes the latest downloaded MP4 clip(s) from BIRDWATCH_CLIP_DIR to MediaMTX.
+  # This avoids BlinkPy login issues inside blinkbridge and reuses our working downloader.
+  rtsp-publisher:
+    image: ghcr.io/mstelz/blink-birdwatch-rtsp-publisher:${RTSP_PUBLISHER_TAG:-v0.1.27}
+    container_name: birdwatch-rtsp-publisher
     restart: unless-stopped
-    tty: true
     environment:
-      - BLINKBRIDGE_CONFIG=/config/config.json
+      - WATCH_DIR=/watch
+      - GLOB_PATTERN=${RTSP_GLOB_PATTERN:-*.mp4}
+      - POLL_SEC=${RTSP_POLL_SEC:-5}
+      - MEDIAMTX_HOST=mediamtx
+      - MEDIAMTX_PORT=8554
+      - RTSP_TRANSPORT=${RTSP_TRANSPORT:-tcp}
+      - STREAM_PREFIX=${RTSP_STREAM_PREFIX:-}
+      - CAMERA_REGEX=${RTSP_CAMERA_REGEX:-^(?P<camera>.+?)-\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.mp4$}
     volumes:
-      - ${BLINKBRIDGE_CONFIG_DIR:-/mnt/user/appdata/blinkbridge/config}:/config
-      - ${BLINKBRIDGE_WORKING_DIR:-/mnt/user/appdata/blinkbridge/working}:/working
+      - ${BIRDWATCH_CLIP_DIR:-/mnt/user/blink-bridge/blink-downloads}:/watch:ro

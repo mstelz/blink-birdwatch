@@ -1,0 +1,17 @@
+# BirdWatch RTSP publisher (MP4 clips -> MediaMTX)
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY bin/rtsp_publisher.py /app/rtsp_publisher.py
+
+ENV WATCH_DIR=/watch \
+    GLOB_PATTERN=*.mp4 \
+    POLL_SEC=5 \
+    MEDIAMTX_HOST=mediamtx \
+    MEDIAMTX_PORT=8554 \
+    RTSP_TRANSPORT=tcp \
+    STREAM_PREFIX=
+
+ENTRYPOINT ["python", "/app/rtsp_publisher.py"]
