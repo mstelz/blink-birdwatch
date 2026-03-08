@@ -32,10 +32,10 @@ services:
       - ${BIRDNET_WATCH_DIR:-./output}:/blink-processed
       - ${BIRDNET_RESULT_DIR:-./birdnet-output}:/birdnet-output
 
-  # Blink motion -> WAV bridge
-  blink-bridge:
-    image: ghcr.io/mstelz/birdwatch:latest
-    container_name: blink-bridge
+  # BirdWatch Blink motion -> WAV bridge
+  birdwatch:
+    image: ghcr.io/mstelz/blink-birdwatch:latest
+    container_name: birdwatch
     restart: unless-stopped
     ports:
       - "${BRIDGE_PORT:-8787}:${PORT:-8787}"
