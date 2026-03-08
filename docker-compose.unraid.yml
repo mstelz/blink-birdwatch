@@ -17,7 +17,10 @@ services:
       - ${BIRDNET_RESULT_DIR:-./birdnet-output}:/birdnet-output
 
   # BirdNET-Go file watcher worker (processes WAV files from bridge)
+  # Disabled by default (use when you want new CSVs generated continuously).
+  # Enable with: docker compose --profile worker up -d
   birdnet-go-worker:
+    profiles: ["worker"]
     image: ghcr.io/tphakala/birdnet-go:nightly
     container_name: birdnet-go-worker
     restart: unless-stopped
@@ -41,6 +44,17 @@ services:
       - "${BRIDGE_PORT:-8787}:${PORT:-8787}"
     env_file:
       - .env
+    environment:
+      # Optional: publish downloaded MP4 clips to MediaMTX (RTSP) from inside this container.
+      # This reduces container count by 1 vs running a separate rtsp-publisher sidecar.
+      - ENABLE_RTSP_PUBLISHER=${ENABLE_RTSP_PUBLISHER:-0}
+      - MEDIAMTX_HOST=mediamtx
+      - MEDIAMTX_PORT=8554
+      - RTSP_POLL_SEC=${RTSP_POLL_SEC:-5}
+      - RTSP_GLOB_PATTERN=${RTSP_GLOB_PATTERN:-*.mp4}
+      - RTSP_TRANSPORT=${RTSP_TRANSPORT:-tcp}
+      - RTSP_STREAM_PREFIX=${RTSP_STREAM_PREFIX:-}
+      - RTSP_CAMERA_REGEX=${RTSP_CAMERA_REGEX:-^(?P<camera>.+?)-\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.mp4$}
     volumes:
       - ${BLINK_CONFIG_DIR:-./config}:/app/config
       - ${BLINK_WORK_DIR:-./work}:/app/work
@@ -70,10 +84,10 @@ services:
     ports:
       - "${MEDIA_MTX_RTSP_PORT:-8554}:8554"
 
-  # BirdWatch RTSP publisher (recommended)
-  # Publishes the latest downloaded MP4 clip(s) from BIRDWATCH_CLIP_DIR to MediaMTX.
-  # This avoids BlinkPy login issues inside blinkbridge and reuses our working downloader.
+  # Optional separate RTSP publisher sidecar (kept for flexibility).
+  # Enable with: docker compose --profile rtsp up -d
   rtsp-publisher:
+    profiles: ["rtsp"]
     image: ghcr.io/mstelz/blink-birdwatch-rtsp-publisher:${RTSP_PUBLISHER_TAG:-v0.1.27}
     container_name: birdwatch-rtsp-publisher
     restart: unless-stopped

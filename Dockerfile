@@ -22,4 +22,4 @@ EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://127.0.0.1:${PORT:-8787}/health || exit 1
 
-CMD ["python3", "/app/bin/blink_service.py"]
+CMD ["/app/bin/start_birdwatch.sh"]
