@@ -60,9 +60,11 @@ services:
       - ${BLINK_WORK_DIR:-./work}:/app/work
       - ${BIRDNET_WATCH_DIR:-./output}:/app/output
 
-  # Sidecar: imports BirdNET-Go CSV outputs into the SQLite DB the UI reads.
-  # This keeps the UI populated even when the worker runs in `directory --type csv` mode.
+  # DB importer (optional)
+  # Imports BirdNET-Go CSV outputs into the SQLite DB the UI reads.
+  # Enable with: docker compose --profile importer up -d
   db-importer:
+    profiles: ["importer"]
     image: ghcr.io/mstelz/blink-birdwatch-db-importer:${BIRDNET_IMPORTER_TAG:-v0.1.26}
     container_name: birdnet-db-importer
     restart: unless-stopped
