@@ -39,6 +39,10 @@ class Config:
     cleanup_mp4 = (os.getenv("CLEANUP_MP4", "") or "").strip().lower() in ("1", "true", "yes", "on")
     download_dir = Path(os.getenv("BLINK_DOWNLOAD_DIR", str(work_dir / "blink-downloads"))).resolve()
 
+    # Optionally persist a copy of each processed MP4 into a directory for RTSP publishing.
+    persist_mp4 = (os.getenv("PERSIST_MP4", "") or "").strip().lower() in ("1", "true", "yes", "on")
+    persist_mp4_dir = Path(os.getenv("PERSIST_MP4_DIR", str(download_dir))).resolve()
+
 class BridgeService:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -136,6 +140,17 @@ class BridgeService:
             else:
                 self.dlog(f"download mediaUrl={media_url} -> {mp4_path}")
                 await self._download_file(str(media_url), mp4_path)
+
+            # Optionally persist the MP4 for RTSP publishing / debugging.
+            if self.cfg.persist_mp4:
+                try:
+                    self.cfg.persist_mp4_dir.mkdir(parents=True, exist_ok=True)
+                    persist_name = mp4_path.name
+                    persist_path = self.cfg.persist_mp4_dir / persist_name
+                    shutil.copy2(mp4_path, persist_path)
+                    self.dlog(f"persisted mp4 -> {persist_path}")
+                except Exception as persist_exc:
+                    self.dlog(f"persist mp4 failed: {persist_exc}")
 
             self.dlog(f"extract wav {mp4_path} -> {wav_tmp}")
             await self._extract_wav(mp4_path, wav_tmp)
