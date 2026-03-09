@@ -44,11 +44,25 @@ class Config:
     persist_mp4 = (os.getenv("PERSIST_MP4", "") or "").strip().lower() in ("1", "true", "yes", "on")
     persist_mp4_dir = Path(os.getenv("PERSIST_MP4_DIR", str(download_dir))).resolve()
 
+    # If the source MP4 already lives in the persistent clip directory, avoid making a duplicate copy.
+    persist_existing_local_mp4 = (os.getenv("PERSIST_EXISTING_LOCAL_MP4", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+    # After a successful WAV extraction, optionally prune older MP4s for the same camera and keep only the newest.
+    prune_old_mp4 = (os.getenv("PRUNE_OLD_MP4", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
 def _slugify_filename_part(value: str | None, default: str = "camera") -> str:
     txt = (value or "").strip().lower()
     txt = re.sub(r"[^a-z0-9]+", "-", txt)
     txt = re.sub(r"-+", "-", txt).strip("-")
     return txt or default
+
+
+def _camera_slug_from_filename(path: Path) -> str | None:
+    name = path.name
+    m = re.match(r"^(?P<camera>.+?)-\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-\d{2}(?:-\d{1,6})?(?:[+-]\d{2}-\d{2})?\.mp4$", name, re.IGNORECASE)
+    if not m:
+        return None
+    return _slugify_filename_part(m.group("camera"), default="camera")
 
 
 class BridgeService:
@@ -136,7 +150,12 @@ class BridgeService:
 
         stamp = self._stamp(event.get('timestamp'))
         clip_stem = f"blink_{stamp}"
+        local_src_path = Path(local_file).resolve() if local_file else None
         camera_slug = _slugify_filename_part(event.get("camera"), default="camera")
+        if camera_slug == "download" and local_src_path is not None:
+            inferred = _camera_slug_from_filename(local_src_path)
+            if inferred:
+                camera_slug = inferred
         persisted_stem = f"{camera_slug}-{stamp}"
         self.cfg.work_dir.mkdir(parents=True, exist_ok=True)
         self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
@@ -158,8 +177,16 @@ class BridgeService:
                     self.cfg.persist_mp4_dir.mkdir(parents=True, exist_ok=True)
                     persist_name = f"{persisted_stem}.mp4"
                     persist_path = self.cfg.persist_mp4_dir / persist_name
-                    shutil.copy2(mp4_path, persist_path)
-                    self.dlog(f"persisted mp4 -> {persist_path}")
+                    src_already_persistent = (
+                        local_src_path is not None
+                        and self.cfg.persist_mp4_dir == local_src_path.parent
+                        and local_src_path.name == persist_name
+                    )
+                    if src_already_persistent and not self.cfg.persist_existing_local_mp4:
+                        self.dlog(f"persist skip existing local mp4 {local_src_path}")
+                    else:
+                        shutil.copy2(mp4_path, persist_path)
+                        self.dlog(f"persisted mp4 -> {persist_path}")
                 except Exception as persist_exc:
                     self.dlog(f"persist mp4 failed: {persist_exc}")
 
@@ -179,6 +206,12 @@ class BridgeService:
                         self.dlog(f"cleaned up source mp4 {src}")
                 except Exception as cleanup_exc:
                     self.dlog(f"cleanup mp4 failed: {cleanup_exc}")
+
+            if self.cfg.prune_old_mp4:
+                try:
+                    self._prune_old_mp4(camera_slug=camera_slug)
+                except Exception as prune_exc:
+                    self.dlog(f"prune old mp4 failed: {prune_exc}")
 
             await self.mark_done(event_id, True)
             return True, None
@@ -229,6 +262,41 @@ class BridgeService:
         _stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError((stderr or b"").decode("utf-8", errors="ignore").strip() or "ffmpeg failed")
+
+    def _prune_old_mp4(self, *, camera_slug: str) -> None:
+        keep: Path | None = None
+        matches: list[Path] = []
+        for pattern in (
+            f"{camera_slug}-*.mp4",
+            f"{camera_slug}_*.mp4",
+        ):
+            matches.extend(self.cfg.persist_mp4_dir.glob(pattern))
+
+        # Back-compat / generic fallback names. If we still have old duplicated download/blink files
+        # for a single-camera setup, keep only the newest of those too.
+        if camera_slug in ("blink", "download"):
+            matches.extend(self.cfg.persist_mp4_dir.glob("download-*.mp4"))
+            matches.extend(self.cfg.persist_mp4_dir.glob("blink_*.mp4"))
+
+        seen: dict[Path, float] = {}
+        for path in matches:
+            try:
+                seen[path] = path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+
+        if not seen:
+            return
+
+        keep = max(seen, key=seen.get)
+        for path in seen:
+            if path == keep:
+                continue
+            try:
+                path.unlink(missing_ok=True)
+                self.dlog(f"pruned old mp4 {path}")
+            except Exception as exc:
+                self.dlog(f"failed pruning {path}: {exc}")
 
     async def fetch_loop(self) -> None:
         if not self.cfg.fetch_command:
