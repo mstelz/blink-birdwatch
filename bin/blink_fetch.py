@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -50,6 +51,23 @@ def _event_id(camera_name, clip_time, clip_url):
 def _err_text(err: Exception) -> str:
     msg = str(err).strip()
     return msg or repr(err)
+
+
+def _slugify_filename_part(value: str | None, default: str = "camera") -> str:
+    txt = (value or "").strip().lower()
+    txt = re.sub(r"[^a-z0-9]+", "-", txt)
+    txt = re.sub(r"-+", "-", txt).strip("-")
+    return txt or default
+
+
+def _stamp(ts: str | None) -> str:
+    dt = datetime.now(timezone.utc)
+    if ts:
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except Exception:
+            pass
+    return dt.isoformat().replace(":", "-").replace(".", "-")
 
 
 def _to_download_since(iso_ts, lookback_sec: int | None = None):
@@ -187,6 +205,17 @@ async def _main():
             base_url = _infer_base_url()
             dlog(f"base_url={base_url}")
 
+            async def _download_with_session(url: str, out_path: str) -> None:
+                dlog(f"authenticated download {url} -> {out_path}")
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        raise RuntimeError(f"download failed status={resp.status} body={body[:200]!r}")
+                    with open(out_path, "wb") as f:
+                        async for chunk in resp.content.iter_chunked(1024 * 256):
+                            if chunk:
+                                f.write(chunk)
+
             async def emit_from_metadata() -> None:
                 nonlocal events
                 # Ask for a limited number; we can tune via env.
@@ -222,17 +251,27 @@ async def _main():
                         event_id = _event_id(camera_name, ts, media_url)
                         if not ignore_seen and event_id in seen:
                             continue
+
+                        camera_slug = _slugify_filename_part(camera_name, default="camera")
+                        local_path = os.path.join(download_dir, f"{camera_slug}-{_stamp(ts)}.mp4")
+                        if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
+                            await _download_with_session(media_url, local_path)
+                        else:
+                            dlog(f"reusing existing local clip {local_path}")
+
                         events.append(
                             {
                                 "id": event_id,
                                 "timestamp": ts,
-                                "mediaUrl": media_url,
+                                "mediaUrl": None,
+                                "localFile": local_path,
                                 "thumbnailUrl": thumb_url,
                                 "source": "blink",
                                 "camera": camera_name,
                             }
                         )
                     except Exception as _e:
+                        dlog(f"metadata event skipped: {_err_text(_e)}")
                         continue
 
             used_download = False
