@@ -161,12 +161,83 @@ async def _main():
             since_arg = _to_download_since(since_iso, lookback_sec=lookback_sec)
             dlog(f"since_iso={since_iso!r} since_arg={since_arg!r} lookback_sec={lookback_sec}")
 
+            # Prefer metadata-based clip discovery. This is more reliable than
+            # camera.recent_clips (often empty) and avoids depending on blink.download_videos().
+            # We emit events with mediaUrl (relative -> absolute), and let the bridge download.
+            #
+            # Optionally, try download_videos first if explicitly requested.
+            fetch_mode = (os.getenv("BLINK_FETCH_MODE", "metadata") or "metadata").strip().lower()
+
+            def _infer_base_url() -> str:
+                # Try to derive a stable base URL from any camera thumbnail URL.
+                try:
+                    for cam in (blink.cameras or {}).values():
+                        thumb = getattr(cam, "thumbnail", None)
+                        if isinstance(thumb, str) and thumb.startswith("http"):
+                            from urllib.parse import urlsplit
+                            u = urlsplit(thumb)
+                            return f"{u.scheme}://{u.netloc}"
+                except Exception:
+                    pass
+                # Fall back: blinkpy Auth defaults are region-specific; this is best-effort.
+                return "https://rest-u037.immedia-semi.com"
+
+            base_url = _infer_base_url()
+            dlog(f"base_url={base_url}")
+
+            async def emit_from_metadata() -> None:
+                nonlocal events
+                # Ask for a limited number; we can tune via env.
+                meta_stop = int(os.getenv("BLINK_FETCH_META_STOP", "200") or "200")
+                dlog(f"fetching videos metadata stop={meta_stop} since_arg={since_arg!r}")
+                md = await blink.get_videos_metadata(since=since_arg, stop=meta_stop)
+                dlog(f"metadata_count={len(md) if md else 0}")
+                if not md:
+                    return
+
+                for m in md:
+                    try:
+                        if m.get("deleted"):
+                            continue
+                        if m.get("type") != "video":
+                            continue
+                        media = (m.get("media") or "").strip()
+                        if not media or not media.endswith(".mp4"):
+                            continue
+                        camera_name = (m.get("device_name") or "").strip() or "unknown"
+                        if include and camera_name.lower() not in include:
+                            continue
+
+                        # created_at is the most consistent field we've observed.
+                        ts = (m.get("created_at") or m.get("updated_at") or _utc_now()).strip()
+                        # normalize iso with +00:00 -> Z
+                        ts = ts.replace("+00:00", "Z")
+
+                        media_url = base_url.rstrip("/") + media
+                        thumb = (m.get("thumbnail") or "").strip()
+                        thumb_url = (base_url.rstrip("/") + thumb) if thumb.startswith("/") else (thumb or None)
+
+                        event_id = _event_id(camera_name, ts, media_url)
+                        if event_id in seen:
+                            continue
+                        events.append(
+                            {
+                                "id": event_id,
+                                "timestamp": ts,
+                                "mediaUrl": media_url,
+                                "thumbnailUrl": thumb_url,
+                                "source": "blink",
+                                "camera": camera_name,
+                            }
+                        )
+                    except Exception as _e:
+                        continue
+
             used_download = False
-            new_files: set[str] = set()
-            if hasattr(blink, "download_videos"):
+            if fetch_mode == "download" and hasattr(blink, "download_videos"):
+                # Keep the old download mode available, but it's not the default.
                 try:
                     dlog("attempting blink.download_videos")
-                    # Snapshot before/after so we can emit events only for newly downloaded files.
                     before: set[str] = set(
                         os.path.abspath(p)
                         for p in glob.glob(os.path.join(download_dir, "**", "*.mp4"), recursive=True)
@@ -183,84 +254,34 @@ async def _main():
                     new_files = after - before
                     used_download = True
                     dlog(f"download_videos completed new_files={len(new_files)}")
-                except Exception as dl_exc:
-                    print(
-                        f"[blink-fetch] download_videos failed, falling back to recent_clips: {_err_text(dl_exc)}",
-                        file=sys.stderr,
-                    )
-                    dlog(f"download_videos failed: {_err_text(dl_exc)}")
-            else:
-                dlog("blink.download_videos not available; using recent_clips")
 
-            if used_download:
-                patterns = ["*.mp4", "*.m4v", "*.mov"]
-                # If download_videos ran, prefer emitting events only for newly created files.
-                files = sorted(new_files) if new_files else []
-                if not files:
-                    # Fall back to scanning (useful if blinkpy overwrote files without changing names).
-                    scan = []
-                    for pat in patterns:
-                        scan.extend(glob.glob(os.path.join(download_dir, "**", pat), recursive=True))
-                    files = sorted(set(scan))
-                dlog(f"download scan patterns={patterns} files_found={len(files)}")
-
-                for fpath in files:
-                    try:
-                        st = os.stat(fpath)
-                    except Exception:
-                        continue
-                    ts = (
-                        datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
-                        .isoformat()
-                        .replace("+00:00", "Z")
-                    )
-                    event_id = _event_id("download", ts, fpath)
-                    if event_id in seen:
-                        continue
-                    events.append(
-                        {
-                            "id": event_id,
-                            "timestamp": ts,
-                            "mediaUrl": None,
-                            "localFile": fpath,
-                            "thumbnailUrl": None,
-                            "source": "blink",
-                            "camera": "download",
-                        }
-                    )
-            else:
-                try:
-                    cam_names = list((blink.cameras or {}).keys())
-                except Exception:
-                    cam_names = []
-                dlog(f"cameras={len(cam_names)} names={cam_names}")
-
-                for camera_name, camera in blink.cameras.items():
-                    if include and camera_name.lower() not in include:
-                        continue
-
-                    recent = list(camera.recent_clips or [])
-                    dlog(f"camera={camera_name} recent_clips={len(recent)}")
-                    for clip in recent:
-                        clip_url = clip.get("clip")
-                        clip_time = clip.get("time") or _utc_now()
-                        if not clip_url:
+                    # emit localFile events
+                    files = sorted(new_files)
+                    for fpath in files:
+                        try:
+                            st = os.stat(fpath)
+                        except Exception:
                             continue
-
-                        event_id = _event_id(camera_name, clip_time, clip_url)
+                        ts = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                        event_id = _event_id("download", ts, fpath)
                         if event_id in seen:
                             continue
-
                         events.append(
                             {
                                 "id": event_id,
-                                "timestamp": clip_time,
-                                "mediaUrl": clip_url,
-                                "thumbnailUrl": camera.thumbnail,
+                                "timestamp": ts,
+                                "mediaUrl": None,
+                                "localFile": fpath,
+                                "thumbnailUrl": None,
                                 "source": "blink",
-                                "camera": camera_name,
+                                "camera": "download",
                             }
                         )
+                except Exception as dl_exc:
+                    dlog(f"download_videos failed: {_err_text(dl_exc)}")
+
+            if not used_download:
+                await emit_from_metadata()
 
             events.sort(key=lambda e: e.get("timestamp") or "")
             if max_events > 0:
