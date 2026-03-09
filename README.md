@@ -63,6 +63,7 @@ Key vars:
 
 - `BIRDNET_GO_INPUT_DIR` output WAV directory
 - `BLINK_FETCH_COMMAND` fetch command (default `python3 /app/bin/blink_fetch.py`)
+- `BLINK_FETCH_MODE=download` to prefer BlinkPy's native clip downloader
 - `BLINK_POLL_INTERVAL_SEC` poll interval
 - `BLINK_AUTH_FILE` auth file path
 - `BLINK_FETCH_STATE_FILE` fetch dedupe state

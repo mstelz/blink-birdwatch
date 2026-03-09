@@ -188,33 +188,14 @@ async def _main():
             # Optionally, try download_videos first if explicitly requested.
             fetch_mode = (os.getenv("BLINK_FETCH_MODE", "metadata") or "metadata").strip().lower()
 
-            def _infer_base_url() -> str:
-                # Try to derive a stable base URL from any camera thumbnail URL.
-                try:
-                    for cam in (blink.cameras or {}).values():
-                        thumb = getattr(cam, "thumbnail", None)
-                        if isinstance(thumb, str) and thumb.startswith("http"):
-                            from urllib.parse import urlsplit
-                            u = urlsplit(thumb)
-                            return f"{u.scheme}://{u.netloc}"
-                except Exception:
-                    pass
-                # Fall back: blinkpy Auth defaults are region-specific; this is best-effort.
-                return "https://rest-u037.immedia-semi.com"
-
-            base_url = _infer_base_url()
-            dlog(f"base_url={base_url}")
-
-            async def _download_with_session(url: str, out_path: str) -> None:
-                dlog(f"authenticated download {url} -> {out_path}")
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        raise RuntimeError(f"download failed status={resp.status} body={body[:200]!r}")
-                    with open(out_path, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(1024 * 256):
-                            if chunk:
-                                f.write(chunk)
+            async def _download_with_blink(address: str, out_path: str) -> None:
+                dlog(f"authenticated download {address} -> {out_path}")
+                response = await blink.do_http_get(address)
+                if getattr(response, 'status', None) != 200:
+                    body = await response.text()
+                    raise RuntimeError(f"download failed status={response.status} body={body[:200]!r}")
+                with open(out_path, "wb") as f:
+                    f.write(await response.read())
 
             async def emit_from_metadata() -> None:
                 nonlocal events
@@ -244,18 +225,18 @@ async def _main():
                         # normalize iso with +00:00 -> Z
                         ts = ts.replace("+00:00", "Z")
 
-                        media_url = base_url.rstrip("/") + media
+                        media_path = media
                         thumb = (m.get("thumbnail") or "").strip()
-                        thumb_url = (base_url.rstrip("/") + thumb) if thumb.startswith("/") else (thumb or None)
+                        thumb_url = thumb or None
 
-                        event_id = _event_id(camera_name, ts, media_url)
+                        event_id = _event_id(camera_name, ts, media_path)
                         if not ignore_seen and event_id in seen:
                             continue
 
                         camera_slug = _slugify_filename_part(camera_name, default="camera")
                         local_path = os.path.join(download_dir, f"{camera_slug}-{_stamp(ts)}.mp4")
                         if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
-                            await _download_with_session(media_url, local_path)
+                            await _download_with_blink(media_path, local_path)
                         else:
                             dlog(f"reusing existing local clip {local_path}")
 
