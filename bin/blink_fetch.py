@@ -97,6 +97,8 @@ async def _main():
     download_dir = os.getenv("BLINK_DOWNLOAD_DIR", "/app/work/blink-downloads").strip()
     debug = (os.getenv("BLINK_FETCH_DEBUG", "") or "").strip().lower() in ("1", "true", "yes", "on")
     lookback_sec = int(os.getenv("BLINK_FETCH_LOOKBACK_SEC", "0") or "0")
+    ignore_seen = (os.getenv("BLINK_FETCH_IGNORE_SEEN", "") or "").strip().lower() in ("1", "true", "yes", "on")
+    no_save_state = (os.getenv("BLINK_FETCH_NO_SAVE_STATE", "") or "").strip().lower() in ("1", "true", "yes", "on")
     blinkpy_debug = (os.getenv("BLINKPY_DEBUG", "") or "").strip().lower() in ("1", "true", "yes", "on")
     aiohttp_debug = (os.getenv("AIOHTTP_DEBUG", "") or "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -133,7 +135,7 @@ async def _main():
 
     if debug:
         dlog(
-            f"state_file={state_file} seen={len(seen)} lastDownloadSince={state.get('lastDownloadSince')} updatedAt={state.get('updatedAt')}"
+            f"state_file={state_file} seen={len(seen)} lastDownloadSince={state.get('lastDownloadSince')} updatedAt={state.get('updatedAt')} ignore_seen={ignore_seen} no_save_state={no_save_state}"
         )
 
     timeout = aiohttp.ClientTimeout(total=60)
@@ -218,7 +220,7 @@ async def _main():
                         thumb_url = (base_url.rstrip("/") + thumb) if thumb.startswith("/") else (thumb or None)
 
                         event_id = _event_id(camera_name, ts, media_url)
-                        if event_id in seen:
+                        if not ignore_seen and event_id in seen:
                             continue
                         events.append(
                             {
@@ -264,7 +266,7 @@ async def _main():
                             continue
                         ts = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
                         event_id = _event_id("download", ts, fpath)
-                        if event_id in seen:
+                        if not ignore_seen and event_id in seen:
                             continue
                         events.append(
                             {
@@ -287,23 +289,26 @@ async def _main():
             if max_events > 0:
                 events = events[-max_events:]
 
-            for ev in events:
-                seen.add(ev["id"])
+            if not no_save_state:
+                for ev in events:
+                    seen.add(ev["id"])
 
-            # Strategy A:
-            # - Always update updatedAt
-            # - Only advance lastDownloadSince when we actually observed new events
-            #   (prevents "chasing now" and missing backlog when polls return 0)
-            now_iso = _utc_now()
-            last_since = state.get("lastDownloadSince") or state.get("updatedAt")
-            if events:
-                # Use the newest event timestamp if available, else now.
-                newest_ts = (events[-1].get("timestamp") or "").strip()
-                last_since = newest_ts or now_iso
-            _save_json(
-                state_file,
-                {"seen": list(seen)[-1000:], "updatedAt": now_iso, "lastDownloadSince": last_since},
-            )
+                # Strategy A:
+                # - Always update updatedAt
+                # - Only advance lastDownloadSince when we actually observed new events
+                #   (prevents "chasing now" and missing backlog when polls return 0)
+                now_iso = _utc_now()
+                last_since = state.get("lastDownloadSince") or state.get("updatedAt")
+                if events:
+                    # Use the newest event timestamp if available, else now.
+                    newest_ts = (events[-1].get("timestamp") or "").strip()
+                    last_since = newest_ts or now_iso
+                _save_json(
+                    state_file,
+                    {"seen": list(seen)[-1000:], "updatedAt": now_iso, "lastDownloadSince": last_since},
+                )
+            else:
+                last_since = state.get("lastDownloadSince") or state.get("updatedAt")
 
             dlog(f"events_found={len(events)} (before max_events trim) next_lastDownloadSince={last_since}")
             await blink.save(auth_file)

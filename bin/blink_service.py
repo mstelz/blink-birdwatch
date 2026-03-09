@@ -20,6 +20,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import re
 
 from aiohttp import web
 
@@ -42,6 +43,13 @@ class Config:
     # Optionally persist a copy of each processed MP4 into a directory for RTSP publishing.
     persist_mp4 = (os.getenv("PERSIST_MP4", "") or "").strip().lower() in ("1", "true", "yes", "on")
     persist_mp4_dir = Path(os.getenv("PERSIST_MP4_DIR", str(download_dir))).resolve()
+
+def _slugify_filename_part(value: str | None, default: str = "camera") -> str:
+    txt = (value or "").strip().lower()
+    txt = re.sub(r"[^a-z0-9]+", "-", txt)
+    txt = re.sub(r"-+", "-", txt).strip("-")
+    return txt or default
+
 
 class BridgeService:
     def __init__(self, cfg: Config):
@@ -126,12 +134,15 @@ class BridgeService:
             await self.mark_done(event_id, False)
             return False, "mediaUrl or localFile required"
 
-        stamp = f"blink_{self._stamp(event.get('timestamp'))}"
+        stamp = self._stamp(event.get('timestamp'))
+        clip_stem = f"blink_{stamp}"
+        camera_slug = _slugify_filename_part(event.get("camera"), default="camera")
+        persisted_stem = f"{camera_slug}-{stamp}"
         self.cfg.work_dir.mkdir(parents=True, exist_ok=True)
         self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
-        mp4_path = self.cfg.work_dir / f"{stamp}.mp4"
-        wav_tmp = self.cfg.work_dir / f"{stamp}.wav"
-        wav_out = self.cfg.output_dir / f"{stamp}.wav"
+        mp4_path = self.cfg.work_dir / f"{clip_stem}.mp4"
+        wav_tmp = self.cfg.work_dir / f"{clip_stem}.wav"
+        wav_out = self.cfg.output_dir / f"{clip_stem}.wav"
 
         try:
             if local_file:
@@ -145,7 +156,7 @@ class BridgeService:
             if self.cfg.persist_mp4:
                 try:
                     self.cfg.persist_mp4_dir.mkdir(parents=True, exist_ok=True)
-                    persist_name = mp4_path.name
+                    persist_name = f"{persisted_stem}.mp4"
                     persist_path = self.cfg.persist_mp4_dir / persist_name
                     shutil.copy2(mp4_path, persist_path)
                     self.dlog(f"persisted mp4 -> {persist_path}")

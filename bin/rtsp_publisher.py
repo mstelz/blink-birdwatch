@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_CAMERA_REGEX = r"^(?P<camera>.+?)-\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.mp4$"
+DEFAULT_CAMERA_REGEX = r"^(?P<camera>.+?)-\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-\d{2}(?:-\d{1,6})?(?:[+-]\d{2}-\d{2})?\.mp4$"
 
 
 def slugify(name: str) -> str:
@@ -73,8 +73,9 @@ class StreamProc:
 def start_ffmpeg(*, src: Path, rtsp_url: str, transport: str) -> subprocess.Popen:
     # Loop the file forever. -re to simulate realtime.
     # Transcode audio to AAC for compatibility; copy video if possible.
+    ffmpeg_bin = os.getenv("FFMPEG_BIN", "ffmpeg")
     cmd = [
-        "ffmpeg",
+        ffmpeg_bin,
         "-hide_banner",
         "-loglevel",
         "warning",
@@ -144,9 +145,16 @@ def main() -> int:
 
             for f in files:
                 m = cam_re.match(f.name)
-                if not m:
-                    continue
-                cam = m.group("camera")
+                if m:
+                    cam = m.group("camera")
+                else:
+                    # Back-compat fallback: old persisted names looked like blink_<timestamp>.mp4
+                    # and carry no camera information. Publish them under a generic stream
+                    # instead of silently ignoring them.
+                    if re.match(r"^blink_\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-\d{2}", f.name, re.IGNORECASE):
+                        cam = "blink"
+                    else:
+                        continue
                 prev = newest_by_cam.get(cam)
                 if not prev or f.stat().st_mtime > prev.stat().st_mtime:
                     newest_by_cam[cam] = f

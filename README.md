@@ -67,6 +67,8 @@ Key vars:
 - `BLINK_AUTH_FILE` auth file path
 - `BLINK_FETCH_STATE_FILE` fetch dedupe state
 - `SEEN_IDS_FILE` bridge dedupe state
+- `PERSIST_MP4=1` to keep processed MP4s for RTSP publishing / debugging
+- `BLINK_FETCH_IGNORE_SEEN=1` and `BLINK_FETCH_NO_SAVE_STATE=1` for one-shot replay testing of recent clips
 
 ## Manual event push example
 
