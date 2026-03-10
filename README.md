@@ -72,6 +72,7 @@ Key vars:
 - `GENERATE_WAV=0` for RTSP-only mode (skip BirdNET WAV extraction)
 - `RTSP_CAMERA_REGEX` should be defined in `.env` / `unraid.env.example`; prefer `^(?P<camera>.+)-\d{4}-.*\.mp4$` when your camera names may contain dashes
 - `RTSP_STILL_HOLD_SEC=0` means "hold the final frame effectively forever until a newer clip replaces it"
+- RTSP publishing now keeps a persistent publisher connection per camera so readers stay connected when a clip ends and the stream falls back to a still frame
 - On Unraid, RTSP publishing runs inside `birdwatch` (set `ENABLE_RTSP_PUBLISHER=1`) and publishes to MediaMTX
 - `BLINK_FETCH_IGNORE_SEEN=1` and `BLINK_FETCH_NO_SAVE_STATE=1` for one-shot replay testing of recent clips
 

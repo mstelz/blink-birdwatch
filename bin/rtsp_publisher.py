@@ -8,22 +8,11 @@ Goal
 
 How it works
 - Watches a directory for MP4 files that match a pattern (default: *.mp4).
-- Groups files by "camera" inferred from filename prefix before the first '-' character.
-  Example: bird-feeder-2026-03-08t12-30-26-00-00.mp4 -> camera="bird" (not desired)
-
-So we instead support RTSP_CAMERA_REGEX (or legacy CAMERA_REGEX) to capture the camera name.
-The default is intentionally broad: it captures everything before the timestamp-ish suffix,
-which is much more tolerant of Blink filename variations.
-
-Example filenames we have seen:
-  bird-feeder-2026-03-08t12-30-26-00-00.mp4
-
-This script will infer camera="bird-feeder".
-
-For each camera, it runs an ffmpeg process that loops the newest clip and publishes to:
-  rtsp://<MEDIAMTX_HOST>:<MEDIAMTX_PORT>/<STREAM_NAME>
-
-When a newer file appears for that camera, the ffmpeg process is restarted.
+- Groups files by camera name using RTSP_CAMERA_REGEX.
+- For each camera, keeps a single long-lived publisher process connected to MediaMTX.
+- When a new clip appears, that clip is played once with audio.
+- After the clip ends, the stream switches to a still frame from the last clip plus silence.
+- When a newer clip appears, content changes without dropping the RTSP publisher session.
 
 Env
 - WATCH_DIR: directory to scan (default: /watch)
@@ -35,24 +24,22 @@ Env
 - MEDIAMTX_PORT: default: 8554
 - RTSP_TRANSPORT: tcp|udp (default: tcp)
 - STREAM_PREFIX: optional prefix for paths (default: "")
-
-Notes
-- This is intentionally simple: play the newest clip once, then hold on its last frame
-  until a newer clip arrives. Audio plays once and then becomes silence while the still
-  frame is held, keeping a stable RTSP URL available without replaying the clip endlessly.
+- RTSP_STILL_HOLD_SEC: 0 means effectively forever; otherwise duration of each still chunk
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-
 
 DEFAULT_CAMERA_REGEX = r"^(?P<camera>.+?)-.*\.mp4$"
 
@@ -64,31 +51,63 @@ def slugify(name: str) -> str:
     return out or "camera"
 
 
-@dataclass
-class StreamProc:
-    camera: str
-    stream_name: str
-    src: Path
-    proc: subprocess.Popen
-
-
-def start_ffmpeg(*, src: Path, rtsp_url: str, transport: str) -> subprocess.Popen:
-    # Play the clip once, then hold on the final video frame instead of replaying the MP4.
-    # Audio plays once and then turns into silence while the still frame is held.
-    ffmpeg_bin = os.getenv("FFMPEG_BIN", "ffmpeg")
-    hold_raw = (os.getenv("RTSP_STILL_HOLD_SEC", "0") or "0").strip()
+def stop_proc(p: subprocess.Popen | None) -> None:
+    if not p or p.poll() is not None:
+        return
     try:
-        hold_int = int(hold_raw)
-    except ValueError:
-        hold_int = 0
-    # ffmpeg's tpad/apad want a finite duration. Treat 0 as "effectively endless until replaced"
-    # by using a very large duration (~10 years).
-    hold_seconds = str(315360000 if hold_int <= 0 else hold_int)
-    cmd = [
-        ffmpeg_bin,
-        "-hide_banner",
-        "-loglevel",
-        "warning",
+        p.send_signal(signal.SIGTERM)
+        for _ in range(30):
+            if p.poll() is not None:
+                return
+            time.sleep(0.1)
+        p.kill()
+    except Exception:
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+
+def ffmpeg_base() -> list[str]:
+    return [os.getenv("FFMPEG_BIN", "ffmpeg"), "-hide_banner", "-loglevel", "warning"]
+
+
+def run_extract_last_frame(src: Path, out_jpg: Path) -> None:
+    cmd = ffmpeg_base() + [
+        "-y",
+        "-sseof",
+        "-0.2",
+        "-i",
+        str(src),
+        "-frames:v",
+        "1",
+        str(out_jpg),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def start_publisher(*, fifo_path: Path, rtsp_url: str, transport: str) -> subprocess.Popen:
+    # Persistent publisher: reads MPEG-TS from a named pipe and stays connected to MediaMTX.
+    cmd = ffmpeg_base() + [
+        "-fflags",
+        "+genpts",
+        "-re",
+        "-i",
+        str(fifo_path),
+        "-c",
+        "copy",
+        "-f",
+        "rtsp",
+        "-rtsp_transport",
+        transport,
+        rtsp_url,
+    ]
+    return subprocess.Popen(cmd)
+
+
+def start_clip_to_pipe(src: Path, fifo_path: Path) -> subprocess.Popen:
+    # Normalize into MPEG-TS/H264/AAC so the persistent publisher can copy packets through.
+    cmd = ffmpeg_base() + [
         "-re",
         "-i",
         str(src),
@@ -96,10 +115,6 @@ def start_ffmpeg(*, src: Path, rtsp_url: str, transport: str) -> subprocess.Pope
         "0:v:0",
         "-map",
         "0:a:0?",
-        "-vf",
-        f"tpad=stop_mode=clone:stop_duration={hold_seconds}",
-        "-af",
-        f"apad=pad_dur={hold_seconds}",
         "-c:v",
         "libx264",
         "-preset",
@@ -115,29 +130,138 @@ def start_ffmpeg(*, src: Path, rtsp_url: str, transport: str) -> subprocess.Pope
         "-ac",
         "1",
         "-f",
-        "rtsp",
-        "-rtsp_transport",
-        transport,
-        rtsp_url,
+        "mpegts",
+        str(fifo_path),
     ]
     return subprocess.Popen(cmd)
 
 
-def stop_proc(p: subprocess.Popen) -> None:
-    if p.poll() is not None:
-        return
+def start_still_to_pipe(still_jpg: Path, fifo_path: Path, duration_sec: int) -> subprocess.Popen:
+    cmd = ffmpeg_base() + [
+        "-re",
+        "-loop",
+        "1",
+        "-i",
+        str(still_jpg),
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=r=48000:cl=mono",
+        "-t",
+        str(duration_sec),
+        "-shortest",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-tune",
+        "zerolatency",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-ac",
+        "1",
+        "-f",
+        "mpegts",
+        str(fifo_path),
+    ]
+    return subprocess.Popen(cmd)
+
+
+@dataclass
+class CameraStream:
+    camera: str
+    stream_name: str
+    rtsp_url: str
+    fifo_path: Path
+    fifo_keepalive_fd: int
+    work_dir: Path
+    publisher: subprocess.Popen
+    thread: threading.Thread | None = None
+    stop_event: threading.Event | None = None
+    current_src: Path | None = None
+    desired_src: Path | None = None
+    last_still: Path | None = None
+    last_error: str | None = None
+
+
+def camera_worker(stream: CameraStream, still_chunk_sec: int) -> None:
+    fifo_path = stream.fifo_path
+    work_dir = stream.work_dir
+    stop_event = stream.stop_event
+    current_clip_proc: subprocess.Popen | None = None
+    still_proc: subprocess.Popen | None = None
+
     try:
-        p.send_signal(signal.SIGTERM)
-        for _ in range(20):
-            if p.poll() is not None:
-                return
-            time.sleep(0.1)
-        p.kill()
-    except Exception:
-        try:
-            p.kill()
-        except Exception:
-            pass
+        while not stop_event.is_set():
+            desired = stream.desired_src
+            if desired is None:
+                time.sleep(0.5)
+                continue
+
+            if stream.current_src != desired:
+                stop_proc(current_clip_proc)
+                stop_proc(still_proc)
+                current_clip_proc = None
+                still_proc = None
+                stream.current_src = desired
+                try:
+                    still_jpg = work_dir / "last.jpg"
+                    run_extract_last_frame(desired, still_jpg)
+                    stream.last_still = still_jpg
+                except Exception as exc:
+                    stream.last_error = f"extract last frame failed: {exc}"
+                    print(f"[rtsp-publisher] cam={stream.camera} {stream.last_error}")
+                    time.sleep(1.0)
+                    continue
+
+                print(f"[rtsp-publisher] cam={stream.camera} switching src={desired.name}")
+                current_clip_proc = start_clip_to_pipe(desired, fifo_path)
+                continue
+
+            if current_clip_proc is not None:
+                rc = current_clip_proc.poll()
+                if rc is None:
+                    time.sleep(0.5)
+                    continue
+                # Clip finished (or failed). Transition to still chunks.
+                if rc != 0:
+                    print(f"[rtsp-publisher] cam={stream.camera} clip ffmpeg exited code={rc}")
+                current_clip_proc = None
+                if stream.last_still is None or not stream.last_still.exists():
+                    time.sleep(0.5)
+                    continue
+                still_proc = start_still_to_pipe(stream.last_still, fifo_path, still_chunk_sec)
+                continue
+
+            if still_proc is not None:
+                rc = still_proc.poll()
+                if rc is None:
+                    time.sleep(0.5)
+                    continue
+                still_proc = None
+                # Start another still chunk unless a newer clip has been requested.
+                if stop_event.is_set():
+                    break
+                if stream.desired_src != stream.current_src:
+                    continue
+                if stream.last_still is not None and stream.last_still.exists():
+                    still_proc = start_still_to_pipe(stream.last_still, fifo_path, still_chunk_sec)
+                    continue
+                time.sleep(0.5)
+                continue
+
+            # No active producer; bootstrap a still if possible.
+            if stream.last_still is not None and stream.last_still.exists():
+                still_proc = start_still_to_pipe(stream.last_still, fifo_path, still_chunk_sec)
+            else:
+                time.sleep(0.5)
+    finally:
+        stop_proc(current_clip_proc)
+        stop_proc(still_proc)
 
 
 def main() -> int:
@@ -156,6 +280,13 @@ def main() -> int:
     )
     cam_re = re.compile(camera_regex, re.IGNORECASE)
 
+    hold_raw = (os.getenv("RTSP_STILL_HOLD_SEC", "0") or "0").strip()
+    try:
+        hold_int = int(hold_raw)
+    except ValueError:
+        hold_int = 0
+    still_chunk_sec = 300 if hold_int <= 0 else max(1, hold_int)
+
     print(f"[rtsp-publisher] watch_dir={watch_dir} glob={glob_pattern} poll_sec={poll_sec}")
     print(f"[rtsp-publisher] mediamtx=rtsp://{mediamtx_host}:{mediamtx_port} transport={transport}")
     print(f"[rtsp-publisher] camera_regex={cam_re.pattern}")
@@ -164,7 +295,8 @@ def main() -> int:
         print(f"[rtsp-publisher] ERROR watch_dir does not exist: {watch_dir}", file=sys.stderr)
         return 2
 
-    procs: dict[str, StreamProc] = {}
+    streams: dict[str, CameraStream] = {}
+    work_root = Path(tempfile.mkdtemp(prefix="rtsp-publisher-"))
 
     last_skip_report: float = 0.0
     last_file_count: int | None = None
@@ -181,9 +313,6 @@ def main() -> int:
                 if m:
                     cam = m.group("camera")
                 else:
-                    # Back-compat fallback: old persisted names looked like blink_<timestamp>.mp4
-                    # and carry no camera information. Publish them under a generic stream
-                    # instead of silently ignoring them.
                     if re.match(r"^blink_\d{4}-\d{2}-\d{2}[Tt]\d{2}-\d{2}-\d{2}", f.name, re.IGNORECASE):
                         cam = "blink"
                     elif re.match(r"^download-\d{4}-\d{2}-\d{2}[Tt]\d{2}-\d{2}-\d{2}", f.name, re.IGNORECASE):
@@ -210,43 +339,68 @@ def main() -> int:
                 print(f"[rtsp-publisher] skipped {len(skipped)} file(s): {sample}{extra}")
                 last_skip_report = now
 
-            # start/restart streams
             for cam, newest in newest_by_cam.items():
                 stream_name = slugify(cam)
-                if stream_prefix:
-                    path = f"{stream_prefix}/{stream_name}"
-                else:
-                    path = stream_name
-
+                path = f"{stream_prefix}/{stream_name}" if stream_prefix else stream_name
                 rtsp_url = f"rtsp://{mediamtx_host}:{mediamtx_port}/{path}"
-
-                existing = procs.get(cam)
-                if existing and existing.src == newest and existing.proc.poll() is None:
-                    continue
-
-                if existing:
-                    print(f"[rtsp-publisher] restarting cam={cam} src={newest.name}")
-                    stop_proc(existing.proc)
-                else:
+                existing = streams.get(cam)
+                if existing is None:
+                    cam_dir = work_root / stream_name
+                    cam_dir.mkdir(parents=True, exist_ok=True)
+                    fifo_path = cam_dir / "stream.ts"
+                    try:
+                        os.mkfifo(fifo_path)
+                    except FileExistsError:
+                        pass
+                    fifo_keepalive_fd = os.open(fifo_path, os.O_RDWR | os.O_NONBLOCK)
+                    publisher = start_publisher(fifo_path=fifo_path, rtsp_url=rtsp_url, transport=transport)
+                    stop_event = threading.Event()
+                    stream = CameraStream(
+                        camera=cam,
+                        stream_name=path,
+                        rtsp_url=rtsp_url,
+                        fifo_path=fifo_path,
+                        fifo_keepalive_fd=fifo_keepalive_fd,
+                        work_dir=cam_dir,
+                        publisher=publisher,
+                        stop_event=stop_event,
+                    )
+                    stream.desired_src = newest
+                    thread = threading.Thread(target=camera_worker, args=(stream, still_chunk_sec), daemon=True)
+                    stream.thread = thread
+                    thread.start()
+                    streams[cam] = stream
                     print(f"[rtsp-publisher] starting cam={cam} src={newest.name}")
+                    print(f"[rtsp-publisher] cam={cam} url={rtsp_url}")
+                else:
+                    if existing.desired_src != newest:
+                        existing.desired_src = newest
+                        print(f"[rtsp-publisher] queued cam={cam} src={newest.name}")
 
-                p = start_ffmpeg(src=newest, rtsp_url=rtsp_url, transport=transport)
-                procs[cam] = StreamProc(camera=cam, stream_name=path, src=newest, proc=p)
-                print(f"[rtsp-publisher] cam={cam} url={rtsp_url}")
-
-            # cleanup dead
-            for cam in list(procs.keys()):
-                if procs[cam].proc.poll() is not None:
-                    print(f"[rtsp-publisher] cam={cam} ffmpeg exited code={procs[cam].proc.returncode}")
-                    procs.pop(cam, None)
+            for cam in list(streams.keys()):
+                stream = streams[cam]
+                if stream.publisher.poll() is not None:
+                    print(f"[rtsp-publisher] cam={cam} publisher exited code={stream.publisher.returncode}")
+                    stream.stop_event.set()
+                    streams.pop(cam, None)
 
             time.sleep(max(1.0, poll_sec))
 
     except KeyboardInterrupt:
         print("[rtsp-publisher] shutting down")
     finally:
-        for sp in procs.values():
-            stop_proc(sp.proc)
+        for stream in streams.values():
+            stream.stop_event.set()
+        for stream in streams.values():
+            stop_proc(stream.publisher)
+        for stream in streams.values():
+            if stream.thread.is_alive():
+                stream.thread.join(timeout=2.0)
+            try:
+                os.close(stream.fifo_keepalive_fd)
+            except Exception:
+                pass
+        shutil.rmtree(work_root, ignore_errors=True)
 
     return 0
 
