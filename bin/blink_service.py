@@ -133,6 +133,62 @@ class BridgeService:
                 pass
         return dt.isoformat().replace(":", "-").replace(".", "-")
 
+    def _candidate_local_paths(self, local_file: str) -> list[Path]:
+        raw = Path(local_file).expanduser()
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        for candidate in (raw, self.cfg.download_dir / raw.name, self.cfg.persist_mp4_dir / raw.name):
+            resolved = candidate.resolve()
+            key = str(resolved)
+            if key not in seen:
+                candidates.append(resolved)
+                seen.add(key)
+        return candidates
+
+    async def _copy_local_file(self, local_file: str, out: Path) -> Path:
+        last_exc: Exception | None = None
+        previous: dict[Path, tuple[int, int] | None] = {}
+        stable_hits: dict[Path, int] = {}
+        tmp_out = out.with_name(out.name + ".part")
+
+        for _ in range(12):
+            for candidate in self._candidate_local_paths(local_file):
+                try:
+                    st = candidate.stat()
+                except FileNotFoundError as exc:
+                    last_exc = exc
+                    previous.pop(candidate, None)
+                    stable_hits.pop(candidate, None)
+                    continue
+
+                sig = (st.st_size, st.st_mtime_ns)
+                if st.st_size <= 0:
+                    previous[candidate] = sig
+                    stable_hits[candidate] = 0
+                    continue
+
+                if previous.get(candidate) == sig:
+                    stable_hits[candidate] = stable_hits.get(candidate, 0) + 1
+                else:
+                    previous[candidate] = sig
+                    stable_hits[candidate] = 0
+                    continue
+
+                try:
+                    if tmp_out.exists():
+                        tmp_out.unlink(missing_ok=True)
+                    shutil.copy2(candidate, tmp_out)
+                    tmp_out.replace(out)
+                    return candidate
+                except FileNotFoundError as exc:
+                    last_exc = exc
+                finally:
+                    tmp_out.unlink(missing_ok=True)
+
+            await asyncio.sleep(0.25)
+
+        raise last_exc or FileNotFoundError(local_file)
+
     async def process_event(self, event: dict[str, Any]) -> tuple[bool, str | None]:
         event_id = event.get("id")
         if not isinstance(event_id, str) or not event_id:
@@ -169,18 +225,14 @@ class BridgeService:
         try:
             if local_file:
                 self.dlog(f"copy local_file={local_file} -> {mp4_path}")
-                copied = False
-                last_exc: Exception | None = None
-                for _ in range(5):
-                    try:
-                        shutil.copy2(local_file, mp4_path)
-                        copied = True
-                        break
-                    except FileNotFoundError as exc:
-                        last_exc = exc
-                        await asyncio.sleep(0.4)
-                if not copied:
-                    raise last_exc or FileNotFoundError(local_file)
+                try:
+                    local_src_path = await self._copy_local_file(local_file, mp4_path)
+                except FileNotFoundError:
+                    if media_url:
+                        self.dlog(f"local_file vanished; falling back to mediaUrl={media_url}")
+                        await self._download_file(str(media_url), mp4_path)
+                    else:
+                        raise
             else:
                 self.dlog(f"download mediaUrl={media_url} -> {mp4_path}")
                 await self._download_file(str(media_url), mp4_path)

@@ -72,11 +72,11 @@ Key vars:
 - `GENERATE_WAV=0` for RTSP-only mode (skip BirdNET WAV extraction)
 - `RTSP_CAMERA_REGEX` should be defined in `.env` / `unraid.env.example`; prefer `^(?P<camera>.+)-\d{4}-.*\.mp4$` when your camera names may contain dashes
 - `RTSP_STILL_HOLD_SEC=0` means "hold the final frame effectively forever until a newer clip replaces it"
-- RTSP publishing now keeps a persistent publisher connection per camera so readers stay connected when a clip ends and the stream falls back to a still frame
-- The persistent publisher path re-sends H264/AAC headers at segment boundaries so clip→still and clip→clip transitions are less likely to break readers
+- `RTSP_VIDEO_FPS=15` controls the long-lived publisher's clip/still frame rate
+- RTSP publishing now keeps one long-lived ffmpeg RTSP publisher per camera; clip changes only swap the FIFO writers feeding that publisher, so MediaMTX readers stay connected when a clip ends or a newer clip arrives
+- The publisher no longer depends on handing multiple MPEG-TS producers across one pipe; it now ingests MJPEG frames + PCM audio continuously, which avoids MPEG-TS DTS/PPS boundary corruption during clip→still and clip→clip transitions
 - Newest-clip selection is based on timestamps parsed from Blink filenames (not filesystem mtime), which avoids bouncing backward to older clips after prune/copy operations
-- The bridge briefly retries vanished local MP4 paths before failing, which reduces racey misses when Blink/download cleanup is in flight
-- v0.1.44 fixes ffmpeg named-pipe writes for the persistent publisher path
+- The bridge now waits briefly for local MP4 paths to stabilize, retries alternate local candidates, and falls back to `mediaUrl` when available if a `localFile` disappears mid-handoff
 - On Unraid, RTSP publishing runs inside `birdwatch` (set `ENABLE_RTSP_PUBLISHER=1`) and publishes to MediaMTX
 - `BLINK_FETCH_IGNORE_SEEN=1` and `BLINK_FETCH_NO_SAVE_STATE=1` for one-shot replay testing of recent clips
 

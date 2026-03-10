@@ -22,7 +22,8 @@ if [[ "${ENABLE_RTSP_PUBLISHER:-0}" == "1" ]]; then
   export GLOB_PATTERN="${RTSP_GLOB_PATTERN:-*.mp4}"
   export RTSP_TRANSPORT="${RTSP_TRANSPORT:-tcp}"
   export STREAM_PREFIX="${RTSP_STREAM_PREFIX:-}"
-  export RTSP_CAMERA_REGEX="${RTSP_CAMERA_REGEX:-^(?P<camera>.+?)-.*\.mp4$}"
+  export RTSP_VIDEO_FPS="${RTSP_VIDEO_FPS:-15}"
+  export RTSP_CAMERA_REGEX="${RTSP_CAMERA_REGEX:-^(?P<camera>.+)-\d{4}-.*\.mp4$}"
   python3 /app/bin/rtsp_publisher.py &
 fi
 
