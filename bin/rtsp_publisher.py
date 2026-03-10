@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_CAMERA_REGEX = r"^(?P<camera>.+?)-\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-\d{2}(?:-\d{1,6})?(?:[+-]\d{2}-\d{2})?\.mp4$"
+DEFAULT_CAMERA_REGEX = r"^(?P<camera>.+?)-\d{4}-\d{2}-\d{2}[Tt]\d{2}-\d{2}-\d{2}(?:-\d{1,6})?(?:[+-]\d{2}-\d{2})?\.mp4$"
 
 
 def slugify(name: str) -> str:
@@ -131,6 +131,7 @@ def main() -> int:
 
     print(f"[rtsp-publisher] watch_dir={watch_dir} glob={glob_pattern} poll_sec={poll_sec}")
     print(f"[rtsp-publisher] mediamtx=rtsp://{mediamtx_host}:{mediamtx_port} transport={transport}")
+    print(f"[rtsp-publisher] camera_regex={cam_re.pattern}")
 
     if not watch_dir.exists():
         print(f"[rtsp-publisher] ERROR watch_dir does not exist: {watch_dir}", file=sys.stderr)
@@ -138,10 +139,15 @@ def main() -> int:
 
     procs: dict[str, StreamProc] = {}
 
+    last_skip_report: float = 0.0
+    last_file_count: int | None = None
+    last_cam_summary: tuple[tuple[str, str], ...] | None = None
+
     try:
         while True:
             files = sorted(watch_dir.glob(glob_pattern))
             newest_by_cam: dict[str, Path] = {}
+            skipped: list[str] = []
 
             for f in files:
                 m = cam_re.match(f.name)
@@ -151,13 +157,31 @@ def main() -> int:
                     # Back-compat fallback: old persisted names looked like blink_<timestamp>.mp4
                     # and carry no camera information. Publish them under a generic stream
                     # instead of silently ignoring them.
-                    if re.match(r"^blink_\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-\d{2}", f.name, re.IGNORECASE):
+                    if re.match(r"^blink_\d{4}-\d{2}-\d{2}[Tt]\d{2}-\d{2}-\d{2}", f.name, re.IGNORECASE):
                         cam = "blink"
+                    elif re.match(r"^download-\d{4}-\d{2}-\d{2}[Tt]\d{2}-\d{2}-\d{2}", f.name, re.IGNORECASE):
+                        cam = "download"
                     else:
+                        skipped.append(f.name)
                         continue
                 prev = newest_by_cam.get(cam)
                 if not prev or f.stat().st_mtime > prev.stat().st_mtime:
                     newest_by_cam[cam] = f
+
+            cam_summary = tuple(sorted((cam, path.name) for cam, path in newest_by_cam.items()))
+            if last_file_count != len(files) or last_cam_summary != cam_summary:
+                print(f"[rtsp-publisher] scan files={len(files)} matched_cams={len(newest_by_cam)}")
+                for cam, path_name in cam_summary:
+                    print(f"[rtsp-publisher] matched cam={cam} newest={path_name}")
+                last_file_count = len(files)
+                last_cam_summary = cam_summary
+
+            now = time.time()
+            if skipped and now - last_skip_report >= max(30.0, poll_sec):
+                sample = ", ".join(skipped[:5])
+                extra = "" if len(skipped) <= 5 else f" (+{len(skipped) - 5} more)"
+                print(f"[rtsp-publisher] skipped {len(skipped)} file(s): {sample}{extra}")
+                last_skip_report = now
 
             # start/restart streams
             for cam, newest in newest_by_cam.items():
