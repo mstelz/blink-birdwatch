@@ -22,7 +22,7 @@ if [[ "${ENABLE_RTSP_PUBLISHER:-0}" == "1" ]]; then
   GLOB_PATTERN="${RTSP_GLOB_PATTERN:-*.mp4}" \
   RTSP_TRANSPORT="${RTSP_TRANSPORT:-tcp}" \
   STREAM_PREFIX="${RTSP_STREAM_PREFIX:-}" \
-  CAMERA_REGEX="${RTSP_CAMERA_REGEX:-^(?P<camera>.+?)-\\d{4}-\\d{2}-\\d{2}t\\d{2}-\\d{2}-\\d{2}-\\d{2}-\\d{2}\\.mp4$}" \
+  CAMERA_REGEX="${RTSP_CAMERA_REGEX:-^(?P<camera>.+?)-\\d{4}-\\d{2}-\\d{2}[Tt]\\d{2}-\\d{2}-\\d{2}(?:-\\d{1,6})?(?:[+-]?\\d{2}-\\d{2})?\\.mp4$}" \
     python3 /app/bin/rtsp_publisher.py &
 fi
 

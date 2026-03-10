@@ -47,6 +47,9 @@ class Config:
     # If the source MP4 already lives in the persistent clip directory, avoid making a duplicate copy.
     persist_existing_local_mp4 = (os.getenv("PERSIST_EXISTING_LOCAL_MP4", "") or "").strip().lower() in ("1", "true", "yes", "on")
 
+    # Toggle BirdNET audio generation. Disable for RTSP-only mode.
+    generate_wav = (os.getenv("GENERATE_WAV", "1") or "1").strip().lower() in ("1", "true", "yes", "on")
+
     # After a successful WAV extraction, optionally prune older MP4s for the same camera and keep only the newest.
     prune_old_mp4 = (os.getenv("PRUNE_OLD_MP4", "") or "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -190,12 +193,15 @@ class BridgeService:
                 except Exception as persist_exc:
                     self.dlog(f"persist mp4 failed: {persist_exc}")
 
-            self.dlog(f"extract wav {mp4_path} -> {wav_tmp}")
-            await self._extract_wav(mp4_path, wav_tmp)
-            # wav_tmp and wav_out may be on different filesystems (e.g., separate Docker bind mounts).
-            # Path.replace() uses os.rename() which fails cross-device with EXDEV.
-            shutil.move(str(wav_tmp), str(wav_out))
-            print(f"[bridge] emitted {wav_out.name}")
+            if self.cfg.generate_wav:
+                self.dlog(f"extract wav {mp4_path} -> {wav_tmp}")
+                await self._extract_wav(mp4_path, wav_tmp)
+                # wav_tmp and wav_out may be on different filesystems (e.g., separate Docker bind mounts).
+                # Path.replace() uses os.rename() which fails cross-device with EXDEV.
+                shutil.move(str(wav_tmp), str(wav_out))
+                print(f"[bridge] emitted {wav_out.name}")
+            else:
+                self.dlog(f"skip wav extraction for {mp4_path} (GENERATE_WAV disabled)")
 
             # Optionally clean up downloaded source mp4s to save space.
             if self.cfg.cleanup_mp4 and local_file:
