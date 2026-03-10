@@ -108,6 +108,7 @@ def start_publisher(*, fifo_path: Path, rtsp_url: str, transport: str) -> subpro
 def start_clip_to_pipe(src: Path, fifo_path: Path) -> subprocess.Popen:
     # Normalize into MPEG-TS/H264/AAC so the persistent publisher can copy packets through.
     cmd = ffmpeg_base() + [
+        "-y",
         "-re",
         "-i",
         str(src),
@@ -138,6 +139,7 @@ def start_clip_to_pipe(src: Path, fifo_path: Path) -> subprocess.Popen:
 
 def start_still_to_pipe(still_jpg: Path, fifo_path: Path, duration_sec: int) -> subprocess.Popen:
     cmd = ffmpeg_base() + [
+        "-y",
         "-re",
         "-loop",
         "1",
