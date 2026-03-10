@@ -305,7 +305,7 @@ def run_extract_last_frame(src: Path, out_jpg: Path) -> None:
     tmp_jpg.replace(out_jpg)
 
 
-def start_publisher(*, audio_url: str, video_url: str, rtsp_url: str, transport: str, video_fps: int) -> subprocess.Popen:
+def start_publisher(*, audio_url: str, video_url: str, rtsp_url: str, transport: str, video_fps: int, h264_preset: str, h264_crf: str) -> subprocess.Popen:
     gop = max(15, int(video_fps * 2))
     cmd = ffmpeg_base() + [
         "-thread_queue_size",
@@ -335,9 +335,11 @@ def start_publisher(*, audio_url: str, video_url: str, rtsp_url: str, transport:
         "-c:v",
         "libx264",
         "-preset",
-        "ultrafast",
+        h264_preset,
         "-tune",
         "zerolatency",
+        "-crf",
+        h264_crf,
         "-pix_fmt",
         "yuv420p",
         "-r",
@@ -418,7 +420,7 @@ def start_clip_audio_feeder(*, src: Path, audio_server: StreamSocketServer) -> P
     return _start_pumped_ffmpeg(cmd, target=audio_server, label=f"audio-{src.name}")
 
 
-def start_clip_video_feeder(*, src: Path, video_server: StreamSocketServer, video_fps: int) -> PumpedProc:
+def start_clip_video_feeder(*, src: Path, video_server: StreamSocketServer, video_fps: int, mjpeg_q: str) -> PumpedProc:
     cmd = ffmpeg_base() + [
         "-y",
         "-re",
@@ -427,9 +429,9 @@ def start_clip_video_feeder(*, src: Path, video_server: StreamSocketServer, vide
         "-map",
         "0:v:0",
         "-vf",
-        f"fps={video_fps}",
+        f"fps={video_fps},scale=in_range=full:out_range=tv",
         "-q:v",
-        "5",
+        mjpeg_q,
         "-f",
         "mjpeg",
         "pipe:1",
@@ -597,12 +599,14 @@ def camera_worker(stream: CameraStream, video_fps: int) -> None:
                 clip_expected_audio = probe.has_audio
                 print(f"[rtsp-publisher] cam={stream.camera} switching src={desired.name}")
                 if probe.has_audio:
+                    print(f"[rtsp-publisher] cam={stream.camera} mode=clip-audio")
                     clip_audio = start_clip_audio_feeder(src=desired, audio_server=stream.audio_server)
                     time.sleep(0.2)
                 else:
+                    print(f"[rtsp-publisher] cam={stream.camera} mode=clip-no-audio -> silence-fill")
                     clip_aux_stop, clip_aux_threads = start_silence_only(stream)
                     time.sleep(0.1)
-                clip_video = start_clip_video_feeder(src=desired, video_server=stream.video_server, video_fps=video_fps)
+                clip_video = start_clip_video_feeder(src=desired, video_server=stream.video_server, video_fps=video_fps, mjpeg_q=mjpeg_q)
                 continue
 
             if clip_video is not None:
@@ -629,7 +633,7 @@ def camera_worker(stream: CameraStream, video_fps: int) -> None:
                 if stream.desired_src != stream.current_src:
                     continue
                 if stream.last_still is not None and stream.last_still.exists():
-                    print(f"[rtsp-publisher] cam={stream.camera} entering still/silence hold")
+                    print(f"[rtsp-publisher] cam={stream.camera} mode=still-silence-hold")
                     filler_stop, filler_threads = start_still_fillers(stream, video_fps)
                     continue
                 time.sleep(0.5)
@@ -697,8 +701,12 @@ def main() -> int:
 
     print(f"[rtsp-publisher] watch_dir={watch_dir} glob={glob_pattern} poll_sec={poll_sec}")
     print(f"[rtsp-publisher] mediamtx=rtsp://{mediamtx_host}:{mediamtx_port} transport={transport}")
+    h264_preset = (os.getenv("RTSP_H264_PRESET", "veryfast") or "veryfast").strip()
+    h264_crf = (os.getenv("RTSP_H264_CRF", "23") or "23").strip()
+    mjpeg_q = (os.getenv("RTSP_MJPEG_Q", "2") or "2").strip()
+
     print(f"[rtsp-publisher] camera_regex={cam_re.pattern}")
-    print(f"[rtsp-publisher] video_fps={video_fps}")
+    print(f"[rtsp-publisher] video_fps={video_fps} h264_preset={h264_preset} h264_crf={h264_crf} mjpeg_q={mjpeg_q}")
     if hold_int <= 0:
         print("[rtsp-publisher] still hold=continuous until newer clip arrives")
     else:
@@ -771,6 +779,8 @@ def main() -> int:
                         rtsp_url=rtsp_url,
                         transport=transport,
                         video_fps=video_fps,
+                        h264_preset=h264_preset,
+                        h264_crf=h264_crf,
                     )
                     stop_event = threading.Event()
                     stream = CameraStream(

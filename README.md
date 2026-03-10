@@ -73,6 +73,7 @@ Key vars:
 - For integrated RTSP-in-birdwatch deployments, the startup script currently forces a known-good default camera regex (`^(?P<camera>.+)-\d{4}-.*\.mp4$`) to avoid startup env mangling seen in some container launches
 - `RTSP_STILL_HOLD_SEC=0` means "hold the final frame effectively forever until a newer clip replaces it"
 - `RTSP_VIDEO_FPS=15` controls the long-lived publisher's clip/still frame rate
+- `RTSP_H264_PRESET`, `RTSP_H264_CRF`, and `RTSP_MJPEG_Q` tune output quality vs CPU usage for the persistent publisher
 - RTSP publishing now keeps one long-lived ffmpeg RTSP publisher per camera; clip changes only swap the FIFO writers feeding that publisher, so MediaMTX readers stay connected when a clip ends or a newer clip arrives
 - The publisher no longer depends on handing multiple MPEG-TS producers across one pipe; it now ingests MJPEG frames + PCM audio continuously, which avoids MPEG-TS DTS/PPS boundary corruption during clip→still and clip→clip transitions
 - Newest-clip selection is based on timestamps parsed from Blink filenames (not filesystem mtime), which avoids bouncing backward to older clips after prune/copy operations
