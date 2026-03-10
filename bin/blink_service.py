@@ -169,7 +169,18 @@ class BridgeService:
         try:
             if local_file:
                 self.dlog(f"copy local_file={local_file} -> {mp4_path}")
-                shutil.copy2(local_file, mp4_path)
+                copied = False
+                last_exc: Exception | None = None
+                for _ in range(5):
+                    try:
+                        shutil.copy2(local_file, mp4_path)
+                        copied = True
+                        break
+                    except FileNotFoundError as exc:
+                        last_exc = exc
+                        await asyncio.sleep(0.4)
+                if not copied:
+                    raise last_exc or FileNotFoundError(local_file)
             else:
                 self.dlog(f"download mediaUrl={media_url} -> {mp4_path}")
                 await self._download_file(str(media_url), mp4_path)

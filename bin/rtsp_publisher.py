@@ -152,6 +152,10 @@ def start_clip_to_pipe(src: Path, fifo_path: Path) -> subprocess.Popen:
     # downstream publisher can survive segment boundaries cleanly.
     cmd = ffmpeg_base() + [
         "-y",
+        "-fflags",
+        "+genpts",
+        "-avoid_negative_ts",
+        "make_zero",
         "-re",
         "-i",
         str(src),
@@ -185,6 +189,8 @@ def start_clip_to_pipe(src: Path, fifo_path: Path) -> subprocess.Popen:
         "0",
         "-muxdelay",
         "0",
+        "-mpegts_copyts",
+        "0",
         "-f",
         "mpegts",
         str(fifo_path),
@@ -195,6 +201,10 @@ def start_clip_to_pipe(src: Path, fifo_path: Path) -> subprocess.Popen:
 def start_still_to_pipe(still_jpg: Path, fifo_path: Path, duration_sec: int) -> subprocess.Popen:
     cmd = ffmpeg_base() + [
         "-y",
+        "-fflags",
+        "+genpts",
+        "-avoid_negative_ts",
+        "make_zero",
         "-re",
         "-loop",
         "1",
@@ -232,6 +242,8 @@ def start_still_to_pipe(still_jpg: Path, fifo_path: Path, duration_sec: int) -> 
         "-muxpreload",
         "0",
         "-muxdelay",
+        "0",
+        "-mpegts_copyts",
         "0",
         "-f",
         "mpegts",
