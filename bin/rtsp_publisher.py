@@ -17,8 +17,7 @@ How it works
 Env
 - WATCH_DIR: directory to scan (default: /watch)
 - GLOB_PATTERN: glob to match clips (default: *.mp4)
-- RTSP_CAMERA_REGEX: regex with a named group (?P<camera>...) (preferred)
-- CAMERA_REGEX: legacy fallback name for the same regex
+- RTSP_CAMERA_REGEX: regex with a named group (?P<camera>...)
 - POLL_SEC: rescan interval seconds (default: 5)
 - MEDIAMTX_HOST: default: mediamtx
 - MEDIAMTX_PORT: default: 8554
@@ -275,11 +274,7 @@ def main() -> int:
     transport = os.getenv("RTSP_TRANSPORT", "tcp")
     stream_prefix = (os.getenv("STREAM_PREFIX", "") or "").strip("/")
 
-    camera_regex = (
-        os.getenv("RTSP_CAMERA_REGEX")
-        or os.getenv("CAMERA_REGEX")
-        or DEFAULT_CAMERA_REGEX
-    )
+    camera_regex = os.getenv("RTSP_CAMERA_REGEX") or DEFAULT_CAMERA_REGEX
     cam_re = re.compile(camera_regex, re.IGNORECASE)
 
     hold_raw = (os.getenv("RTSP_STILL_HOLD_SEC", "0") or "0").strip()

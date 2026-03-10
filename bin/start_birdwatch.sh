@@ -13,8 +13,7 @@ if [[ "${ENABLE_RTSP_PUBLISHER:-0}" == "1" ]]; then
   # By default publish clips from the same directory blink_fetch downloads into.
   : "${RTSP_WATCH_DIR:=${BLINK_DOWNLOAD_DIR:-/app/work/blink-downloads}}"
 
-  # Start in background. Export vars explicitly; publisher reads RTSP_CAMERA_REGEX directly
-  # (and still supports legacy CAMERA_REGEX as a fallback).
+  # Start in background. Export vars explicitly; publisher reads RTSP_CAMERA_REGEX directly.
   export PYTHONUNBUFFERED=1
   export WATCH_DIR="$RTSP_WATCH_DIR"
   export MEDIAMTX_HOST="$MEDIAMTX_HOST"
