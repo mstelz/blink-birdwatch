@@ -545,7 +545,7 @@ def prepare_clip(stream: CameraStream, desired: Path) -> tuple[ClipProbe, Path]:
     return probe, still_path
 
 
-def camera_worker(stream: CameraStream, video_fps: int) -> None:
+def camera_worker(stream: CameraStream, video_fps: int, mjpeg_q: str) -> None:
     stop_event = stream.stop_event
     assert stop_event is not None
 
@@ -794,7 +794,7 @@ def main() -> int:
                         stop_event=stop_event,
                     )
                     stream.desired_src = newest
-                    thread = threading.Thread(target=camera_worker, args=(stream, video_fps), daemon=True)
+                    thread = threading.Thread(target=camera_worker, args=(stream, video_fps, mjpeg_q), daemon=True)
                     stream.thread = thread
                     thread.start()
                     streams[cam] = stream
