@@ -38,9 +38,11 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_CAMERA_REGEX = r"^(?P<camera>.+?)-.*\.mp4$"
+TIMESTAMP_IN_NAME_RE = re.compile(r"^(?P<camera>.+)-(?P<stamp>\d{4}-\d{2}-\d{2}[Tt]\d{2}-\d{2}-\d{2}(?:-\d{1,6})?(?:[+-]?\d{2}-\d{2})?)\.mp4$", re.IGNORECASE)
 
 
 def slugify(name: str) -> str:
@@ -48,6 +50,32 @@ def slugify(name: str) -> str:
     out = re.sub(r"[^a-z0-9]+", "_", out)
     out = re.sub(r"_+", "_", out).strip("_")
     return out or "camera"
+
+
+def _parse_name_timestamp(path: Path) -> float:
+    m = TIMESTAMP_IN_NAME_RE.match(path.name)
+    if not m:
+        try:
+            return path.stat().st_mtime
+        except FileNotFoundError:
+            return float("-inf")
+
+    stamp = m.group("stamp")
+    txt = stamp.replace("t", "T")
+    # Fractional seconds style: ...T17-52-11-761086+00-00
+    txt = re.sub(r"T(\d{2})-(\d{2})-(\d{2})-(\d{1,6})([+-]\d{2})-(\d{2})$", r"T\1:\2:\3.\4\5:\6", txt)
+    # Old style suffix: ...T17-07-43-00-00  -> timezone -00:00
+    txt = re.sub(r"T(\d{2})-(\d{2})-(\d{2})([+-]\d{2})-(\d{2})$", r"T\1:\2:\3\4:\5", txt)
+    try:
+        dt = datetime.fromisoformat(txt)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except ValueError:
+        try:
+            return path.stat().st_mtime
+        except FileNotFoundError:
+            return float("-inf")
 
 
 def stop_proc(p: subprocess.Popen | None) -> None:
@@ -244,6 +272,9 @@ def camera_worker(stream: CameraStream, still_chunk_sec: int) -> None:
                 continue
 
             if stream.current_src != desired:
+                if not desired.exists():
+                    time.sleep(0.5)
+                    continue
                 stop_proc(current_clip_proc)
                 stop_proc(still_proc)
                 current_clip_proc = None
@@ -345,6 +376,7 @@ def main() -> int:
             newest_by_cam: dict[str, Path] = {}
             skipped: list[str] = []
 
+            newest_key_by_cam: dict[str, float] = {}
             for f in files:
                 m = cam_re.match(f.name)
                 if m:
@@ -357,8 +389,10 @@ def main() -> int:
                     else:
                         skipped.append(f.name)
                         continue
-                prev = newest_by_cam.get(cam)
-                if not prev or f.stat().st_mtime > prev.stat().st_mtime:
+                key = _parse_name_timestamp(f)
+                prev_key = newest_key_by_cam.get(cam, float("-inf"))
+                if key > prev_key:
+                    newest_key_by_cam[cam] = key
                     newest_by_cam[cam] = f
 
             cam_summary = tuple(sorted((cam, path.name) for cam, path in newest_by_cam.items()))
@@ -410,7 +444,11 @@ def main() -> int:
                     print(f"[rtsp-publisher] starting cam={cam} src={newest.name}")
                     print(f"[rtsp-publisher] cam={cam} url={rtsp_url}")
                 else:
-                    if existing.desired_src != newest:
+                    if not newest.exists():
+                        continue
+                    current_key = _parse_name_timestamp(existing.desired_src) if existing.desired_src else float("-inf")
+                    new_key = _parse_name_timestamp(newest)
+                    if new_key >= current_key and existing.desired_src != newest:
                         existing.desired_src = newest
                         print(f"[rtsp-publisher] queued cam={cam} src={newest.name}")
 

@@ -74,6 +74,7 @@ Key vars:
 - `RTSP_STILL_HOLD_SEC=0` means "hold the final frame effectively forever until a newer clip replaces it"
 - RTSP publishing now keeps a persistent publisher connection per camera so readers stay connected when a clip ends and the stream falls back to a still frame
 - The persistent publisher path re-sends H264/AAC headers at segment boundaries so clip→still and clip→clip transitions are less likely to break readers
+- Newest-clip selection is based on timestamps parsed from Blink filenames (not filesystem mtime), which avoids bouncing backward to older clips after prune/copy operations
 - v0.1.44 fixes ffmpeg named-pipe writes for the persistent publisher path
 - On Unraid, RTSP publishing runs inside `birdwatch` (set `ENABLE_RTSP_PUBLISHER=1`) and publishes to MediaMTX
 - `BLINK_FETCH_IGNORE_SEEN=1` and `BLINK_FETCH_NO_SAVE_STATE=1` for one-shot replay testing of recent clips
