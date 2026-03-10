@@ -35,7 +35,7 @@ services:
       - ${BIRDNET_WATCH_DIR:-./output}:/blink-processed
       - ${BIRDNET_RESULT_DIR:-./birdnet-output}:/birdnet-output
 
-  # BirdWatch Blink motion -> WAV bridge
+  # BirdWatch Blink motion bridge + integrated RTSP publisher
   birdwatch:
     image: ghcr.io/mstelz/blink-birdwatch:latest
     container_name: birdwatch
@@ -44,6 +44,16 @@ services:
       - "${BRIDGE_PORT:-8787}:${PORT:-8787}"
     env_file:
       - .env
+    environment:
+      - ENABLE_RTSP_PUBLISHER=${ENABLE_RTSP_PUBLISHER:-0}
+      - MEDIAMTX_HOST=mediamtx
+      - MEDIAMTX_PORT=8554
+      - RTSP_POLL_SEC=${RTSP_POLL_SEC:-5}
+      - RTSP_GLOB_PATTERN=${RTSP_GLOB_PATTERN:-*.mp4}
+      - RTSP_TRANSPORT=${RTSP_TRANSPORT:-tcp}
+      - RTSP_STREAM_PREFIX=${RTSP_STREAM_PREFIX:-}
+      - RTSP_CAMERA_REGEX=${RTSP_CAMERA_REGEX}
+      - RTSP_STILL_HOLD_SEC=${RTSP_STILL_HOLD_SEC:-0}
     volumes:
       - ${BLINK_CONFIG_DIR:-./config}:/app/config
       - ${BLINK_WORK_DIR:-./work}:/app/work
@@ -75,20 +85,3 @@ services:
     ports:
       - "${MEDIA_MTX_RTSP_PORT:-8554}:8554"
 
-  # RTSP publisher sidecar (recommended): publishes the newest clip for each camera to MediaMTX.
-  rtsp-publisher:
-    image: ghcr.io/mstelz/blink-birdwatch-rtsp-publisher:${RTSP_PUBLISHER_TAG:-latest}
-    container_name: birdwatch-rtsp-publisher
-    restart: unless-stopped
-    environment:
-      - WATCH_DIR=/watch
-      - GLOB_PATTERN=${RTSP_GLOB_PATTERN:-*.mp4}
-      - POLL_SEC=${RTSP_POLL_SEC:-5}
-      - MEDIAMTX_HOST=mediamtx
-      - MEDIAMTX_PORT=8554
-      - RTSP_TRANSPORT=${RTSP_TRANSPORT:-tcp}
-      - STREAM_PREFIX=${RTSP_STREAM_PREFIX:-}
-      - RTSP_CAMERA_REGEX=${RTSP_CAMERA_REGEX}
-      - RTSP_STILL_HOLD_SEC=${RTSP_STILL_HOLD_SEC:-0}
-    volumes:
-      - ${BIRDWATCH_CLIP_DIR:-/mnt/user/blink-bridge/blink-downloads}:/watch:ro
