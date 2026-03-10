@@ -597,11 +597,41 @@ def start_publisher(
     return subprocess.Popen(cmd)
 
 
-def _pump_stream_to_socket(src, target: StreamSocketServer, stop_event: threading.Event, label: str) -> None:
+def _read_stream_chunk(src, *, chunk_size: int, require_full_chunk: bool) -> tuple[bytes, bool]:
+    if chunk_size <= 0:
+        chunk_size = 64 * 1024
+    if not require_full_chunk:
+        return src.read(chunk_size), True
+
+    buf = bytearray()
+    while len(buf) < chunk_size:
+        part = src.read(chunk_size - len(buf))
+        if not part:
+            break
+        buf.extend(part)
+    if not buf:
+        return b"", True
+    return bytes(buf), len(buf) == chunk_size
+
+
+def _pump_stream_to_socket(
+    src,
+    target: StreamSocketServer,
+    stop_event: threading.Event,
+    label: str,
+    *,
+    chunk_size: int = 64 * 1024,
+    require_full_chunk: bool = False,
+) -> None:
     try:
         while not stop_event.is_set():
-            chunk = src.read(64 * 1024)
+            chunk, complete = _read_stream_chunk(src, chunk_size=chunk_size, require_full_chunk=require_full_chunk)
             if not chunk:
+                return
+            if require_full_chunk and not complete:
+                print(
+                    f"[rtsp-publisher] pump-short-read {label}: dropped trailing partial chunk bytes={len(chunk)} expected={chunk_size}"
+                )
                 return
             target.write(chunk, stop_event)
     except BrokenPipeError:
@@ -615,13 +645,21 @@ def _pump_stream_to_socket(src, target: StreamSocketServer, stop_event: threadin
             pass
 
 
-def _start_pumped_ffmpeg(cmd: list[str], *, target: StreamSocketServer, label: str) -> PumpedProc:
+def _start_pumped_ffmpeg(
+    cmd: list[str],
+    *,
+    target: StreamSocketServer,
+    label: str,
+    chunk_size: int = 64 * 1024,
+    require_full_chunk: bool = False,
+) -> PumpedProc:
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     assert proc.stdout is not None
     stop_event = threading.Event()
     thread = threading.Thread(
         target=_pump_stream_to_socket,
         args=(proc.stdout, target, stop_event, label),
+        kwargs={"chunk_size": chunk_size, "require_full_chunk": require_full_chunk},
         name=f"pump-{label}",
         daemon=True,
     )
@@ -666,7 +704,13 @@ def start_clip_video_feeder(*, src: Path, video_server: StreamSocketServer, vide
         "rawvideo",
         "pipe:1",
     ]
-    return _start_pumped_ffmpeg(cmd, target=video_server, label=f"video-{src.name}")
+    return _start_pumped_ffmpeg(
+        cmd,
+        target=video_server,
+        label=f"video-{src.name}",
+        chunk_size=geometry.raw_frame_size,
+        require_full_chunk=True,
+    )
 
 
 def stop_pumped_proc(state: PumpedProc | None) -> None:
@@ -834,6 +878,50 @@ def start_still_fillers(stream: CameraStream, video_fps: int) -> tuple[threading
     )
 
 
+def activate_prepared_clip(
+    stream: CameraStream,
+    prepared: PreparedClip,
+    *,
+    transport: str,
+    video_fps: int,
+    h264_preset: str,
+    h264_crf: str,
+) -> tuple[bool, PumpedProc | None, PumpedProc, threading.Event | None, list[threading.Thread]]:
+    clip_video = start_clip_video_feeder(
+        src=prepared.clip.path,
+        video_server=stream.video_server,
+        video_fps=video_fps,
+        geometry=prepared.geometry,
+    )
+    clip_audio: PumpedProc | None = None
+    clip_aux_stop: threading.Event | None = None
+    clip_aux_threads: list[threading.Thread] = []
+    try:
+        clip_expected_audio = prepared.probe.has_audio
+        if clip_expected_audio:
+            clip_audio = start_clip_audio_feeder(src=prepared.clip.path, audio_server=stream.audio_server)
+            time.sleep(0.2)
+        else:
+            clip_aux_stop, clip_aux_threads = start_silence_only(stream)
+            print(f"[rtsp-publisher] cam={stream.camera} clip={prepared.clip.name} audio-fallback=zero-pcm-silence")
+            time.sleep(0.1)
+
+        ensure_publisher(
+            stream,
+            transport=transport,
+            video_fps=video_fps,
+            geometry=prepared.geometry,
+            h264_preset=h264_preset,
+            h264_crf=h264_crf,
+        )
+        return clip_expected_audio, clip_audio, clip_video, clip_aux_stop, clip_aux_threads
+    except Exception:
+        stop_pumped_proc(clip_video)
+        stop_pumped_proc(clip_audio)
+        stop_threads(clip_aux_stop, clip_aux_threads)
+        raise
+
+
 def camera_worker(stream: CameraStream, *, transport: str, video_fps: int, h264_preset: str, h264_crf: str) -> None:
     stop_event = stream.stop_event
 
@@ -876,11 +964,13 @@ def camera_worker(stream: CameraStream, *, transport: str, video_fps: int, h264_
             if preparing_clip is not None and clip_video is None:
                 try:
                     prepared = prepare_clip(stream, preparing_clip)
-                    ensure_publisher(
+                    stop_clip_state()
+                    stop_filler_state()
+                    clip_expected_audio, clip_audio, clip_video, clip_aux_stop, clip_aux_threads = activate_prepared_clip(
                         stream,
+                        prepared,
                         transport=transport,
                         video_fps=video_fps,
-                        geometry=prepared.geometry,
                         h264_preset=h264_preset,
                         h264_crf=h264_crf,
                     )
@@ -906,8 +996,6 @@ def camera_worker(stream: CameraStream, *, transport: str, video_fps: int, h264_
                     time.sleep(1.0)
                     continue
 
-                stop_clip_state()
-                stop_filler_state()
                 with stream.lock:
                     stream.last_still_frame = prepared.still_frame
                     stream.video_geometry = prepared.geometry
@@ -927,20 +1015,6 @@ def camera_worker(stream: CameraStream, *, transport: str, video_fps: int, h264_
                     ),
                 )
                 current_clip = preparing_clip
-                clip_expected_audio = prepared.probe.has_audio
-                if prepared.probe.has_audio:
-                    clip_audio = start_clip_audio_feeder(src=preparing_clip.path, audio_server=stream.audio_server)
-                    time.sleep(0.2)
-                else:
-                    clip_aux_stop, clip_aux_threads = start_silence_only(stream)
-                    print(f"[rtsp-publisher] cam={stream.camera} clip={preparing_clip.name} audio-fallback=zero-pcm-silence")
-                    time.sleep(0.1)
-                clip_video = start_clip_video_feeder(
-                    src=preparing_clip.path,
-                    video_server=stream.video_server,
-                    video_fps=video_fps,
-                    geometry=prepared.geometry,
-                )
                 preparing_clip = None
                 continue
 
