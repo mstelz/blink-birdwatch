@@ -70,7 +70,7 @@ Key vars:
 - `SEEN_IDS_FILE` bridge dedupe state
 - `PERSIST_MP4=1` to keep processed MP4s for RTSP publishing / debugging
 - `GENERATE_WAV=0` for RTSP-only mode (skip BirdNET WAV extraction)
-- `RTSP_CAMERA_REGEX` should be defined in `.env` / `unraid.env.example` instead of inline in Compose, since regex quantifiers (`{}`) can confuse Compose interpolation
+- `RTSP_CAMERA_REGEX` should be defined in `.env` / `unraid.env.example` instead of inline in Compose; prefer a broad pattern like `^(?P<camera>.+?)-.*\.mp4$`
 - `BLINK_FETCH_IGNORE_SEEN=1` and `BLINK_FETCH_NO_SAVE_STATE=1` for one-shot replay testing of recent clips
 
 ## Manual event push example

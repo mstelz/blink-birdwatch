@@ -11,9 +11,9 @@ How it works
 - Groups files by "camera" inferred from filename prefix before the first '-' character.
   Example: bird-feeder-2026-03-08t12-30-26-00-00.mp4 -> camera="bird" (not desired)
 
-So we instead support CAMERA_REGEX to capture the camera name. Default expects:
-  <camera-name>-YYYY-...
-  where camera-name may contain dashes.
+So we instead support RTSP_CAMERA_REGEX (or legacy CAMERA_REGEX) to capture the camera name.
+The default is intentionally broad: it captures everything before the timestamp-ish suffix,
+which is much more tolerant of Blink filename variations.
 
 Example filenames we have seen:
   bird-feeder-2026-03-08t12-30-26-00-00.mp4
@@ -28,7 +28,8 @@ When a newer file appears for that camera, the ffmpeg process is restarted.
 Env
 - WATCH_DIR: directory to scan (default: /watch)
 - GLOB_PATTERN: glob to match clips (default: *.mp4)
-- CAMERA_REGEX: regex with a named group (?P<camera>...) (default below)
+- RTSP_CAMERA_REGEX: regex with a named group (?P<camera>...) (preferred)
+- CAMERA_REGEX: legacy fallback name for the same regex
 - POLL_SEC: rescan interval seconds (default: 5)
 - MEDIAMTX_HOST: default: mediamtx
 - MEDIAMTX_PORT: default: 8554
@@ -52,7 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_CAMERA_REGEX = r"^(?P<camera>.+?)-\d{4}-\d{2}-\d{2}[Tt]\d{2}-\d{2}-\d{2}(?:-\d{1,6})?(?:[+-]\d{2}-\d{2})?\.mp4$"
+DEFAULT_CAMERA_REGEX = r"^(?P<camera>.+?)-.*\.mp4$"
 
 
 def slugify(name: str) -> str:
@@ -127,7 +128,12 @@ def main() -> int:
     transport = os.getenv("RTSP_TRANSPORT", "tcp")
     stream_prefix = (os.getenv("STREAM_PREFIX", "") or "").strip("/")
 
-    cam_re = re.compile(os.getenv("CAMERA_REGEX", DEFAULT_CAMERA_REGEX), re.IGNORECASE)
+    camera_regex = (
+        os.getenv("RTSP_CAMERA_REGEX")
+        or os.getenv("CAMERA_REGEX")
+        or DEFAULT_CAMERA_REGEX
+    )
+    cam_re = re.compile(camera_regex, re.IGNORECASE)
 
     print(f"[rtsp-publisher] watch_dir={watch_dir} glob={glob_pattern} poll_sec={poll_sec}")
     print(f"[rtsp-publisher] mediamtx=rtsp://{mediamtx_host}:{mediamtx_port} transport={transport}")
