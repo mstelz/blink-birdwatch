@@ -70,7 +70,7 @@ Key vars:
 - `SEEN_IDS_FILE` bridge dedupe state
 - `PERSIST_MP4=1` to keep processed MP4s for RTSP publishing / debugging
 - `GENERATE_WAV=0` for RTSP-only mode (skip BirdNET WAV extraction)
-- `RTSP_CAMERA_REGEX` should be defined in `.env` / `unraid.env.example`; prefer `^(?P<camera>.+)-\d{4}-.*\.mp4$` when your camera names may contain dashes
+- For integrated RTSP-in-birdwatch deployments, the startup script currently forces a known-good default camera regex (`^(?P<camera>.+)-\d{4}-.*\.mp4$`) to avoid startup env mangling seen in some container launches
 - `RTSP_STILL_HOLD_SEC=0` means "hold the final frame effectively forever until a newer clip replaces it"
 - `RTSP_VIDEO_FPS=15` controls the long-lived publisher's clip/still frame rate
 - RTSP publishing now keeps one long-lived ffmpeg RTSP publisher per camera; clip changes only swap the FIFO writers feeding that publisher, so MediaMTX readers stay connected when a clip ends or a newer clip arrives
