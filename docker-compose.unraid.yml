@@ -44,17 +44,6 @@ services:
       - "${BRIDGE_PORT:-8787}:${PORT:-8787}"
     env_file:
       - .env
-    environment:
-      # Optional: publish downloaded MP4 clips to MediaMTX (RTSP) from inside this container.
-      # This reduces container count by 1 vs running a separate rtsp-publisher sidecar.
-      - ENABLE_RTSP_PUBLISHER=${ENABLE_RTSP_PUBLISHER:-0}
-      - MEDIAMTX_HOST=mediamtx
-      - MEDIAMTX_PORT=8554
-      - RTSP_POLL_SEC=${RTSP_POLL_SEC:-5}
-      - RTSP_GLOB_PATTERN=${RTSP_GLOB_PATTERN:-*.mp4}
-      - RTSP_TRANSPORT=${RTSP_TRANSPORT:-tcp}
-      - RTSP_STREAM_PREFIX=${RTSP_STREAM_PREFIX:-}
-      - RTSP_CAMERA_REGEX=${RTSP_CAMERA_REGEX}
     volumes:
       - ${BLINK_CONFIG_DIR:-./config}:/app/config
       - ${BLINK_WORK_DIR:-./work}:/app/work
@@ -86,11 +75,9 @@ services:
     ports:
       - "${MEDIA_MTX_RTSP_PORT:-8554}:8554"
 
-  # Optional separate RTSP publisher sidecar (kept for flexibility).
-  # Enable with: docker compose --profile rtsp up -d
+  # RTSP publisher sidecar (recommended): publishes the newest clip for each camera to MediaMTX.
   rtsp-publisher:
-    profiles: ["rtsp"]
-    image: ghcr.io/mstelz/blink-birdwatch-rtsp-publisher:${RTSP_PUBLISHER_TAG:-v0.1.27}
+    image: ghcr.io/mstelz/blink-birdwatch-rtsp-publisher:${RTSP_PUBLISHER_TAG:-latest}
     container_name: birdwatch-rtsp-publisher
     restart: unless-stopped
     environment:
@@ -101,6 +88,7 @@ services:
       - MEDIAMTX_PORT=8554
       - RTSP_TRANSPORT=${RTSP_TRANSPORT:-tcp}
       - STREAM_PREFIX=${RTSP_STREAM_PREFIX:-}
-      - CAMERA_REGEX=${RTSP_CAMERA_REGEX:-^(?P<camera>.+?)-\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.mp4$}
+      - RTSP_CAMERA_REGEX=${RTSP_CAMERA_REGEX}
+      - RTSP_STILL_HOLD_SEC=${RTSP_STILL_HOLD_SEC:-0}
     volumes:
       - ${BIRDWATCH_CLIP_DIR:-/mnt/user/blink-bridge/blink-downloads}:/watch:ro

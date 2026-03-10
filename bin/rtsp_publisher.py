@@ -38,8 +38,8 @@ Env
 
 Notes
 - This is intentionally simple: play the newest clip once, then hold on its last frame
-  until a newer clip arrives. That avoids replaying clip audio forever while keeping a
-  stable RTSP URL available.
+  until a newer clip arrives. Audio plays once and then becomes silence while the still
+  frame is held, keeping a stable RTSP URL available without replaying the clip endlessly.
 """
 
 from __future__ import annotations
@@ -73,11 +73,17 @@ class StreamProc:
 
 
 def start_ffmpeg(*, src: Path, rtsp_url: str, transport: str) -> subprocess.Popen:
-    # Play the clip once, then hold on the final video frame for a long time instead of
-    # replaying the MP4 (and its audio) forever. When a newer clip appears, the publisher
-    # restarts ffmpeg on that file.
+    # Play the clip once, then hold on the final video frame instead of replaying the MP4.
+    # Audio plays once and then turns into silence while the still frame is held.
     ffmpeg_bin = os.getenv("FFMPEG_BIN", "ffmpeg")
-    hold_seconds = os.getenv("RTSP_STILL_HOLD_SEC", "86400") or "86400"
+    hold_raw = (os.getenv("RTSP_STILL_HOLD_SEC", "0") or "0").strip()
+    try:
+        hold_int = int(hold_raw)
+    except ValueError:
+        hold_int = 0
+    # ffmpeg's tpad/apad want a finite duration. Treat 0 as "effectively endless until replaced"
+    # by using a very large duration (~10 years).
+    hold_seconds = str(315360000 if hold_int <= 0 else hold_int)
     cmd = [
         ffmpeg_bin,
         "-hide_banner",
@@ -88,8 +94,12 @@ def start_ffmpeg(*, src: Path, rtsp_url: str, transport: str) -> subprocess.Pope
         str(src),
         "-map",
         "0:v:0",
+        "-map",
+        "0:a:0?",
         "-vf",
         f"tpad=stop_mode=clone:stop_duration={hold_seconds}",
+        "-af",
+        f"apad=pad_dur={hold_seconds}",
         "-c:v",
         "libx264",
         "-preset",
@@ -98,7 +108,12 @@ def start_ffmpeg(*, src: Path, rtsp_url: str, transport: str) -> subprocess.Pope
         "zerolatency",
         "-pix_fmt",
         "yuv420p",
-        "-an",
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-ac",
+        "1",
         "-f",
         "rtsp",
         "-rtsp_transport",
