@@ -73,10 +73,14 @@ Key vars:
 - For integrated RTSP-in-birdwatch deployments, the startup script currently forces a known-good default camera regex (`^(?P<camera>.+)-\d{4}-.*\.mp4$`) to avoid startup env mangling seen in some container launches
 - `RTSP_STILL_HOLD_SEC=0` means "hold the final frame effectively forever until a newer clip replaces it"
 - `RTSP_VIDEO_FPS=15` controls the long-lived publisher's clip/still frame rate
-- `RTSP_H264_PRESET`, `RTSP_H264_CRF`, and `RTSP_MJPEG_Q` tune output quality vs CPU usage for the persistent publisher
-- RTSP publishing now keeps one long-lived ffmpeg RTSP publisher per camera; clip changes only swap the FIFO writers feeding that publisher, so MediaMTX readers stay connected when a clip ends or a newer clip arrives
-- The publisher no longer depends on handing multiple MPEG-TS producers across one pipe; it now ingests MJPEG frames + PCM audio continuously, which avoids MPEG-TS DTS/PPS boundary corruption during clip→still and clip→clip transitions
-- Newest-clip selection is based on timestamps parsed from Blink filenames (not filesystem mtime), which avoids bouncing backward to older clips after prune/copy operations
+- `RTSP_H264_PRESET` and `RTSP_H264_CRF` tune output quality vs CPU usage for the persistent publisher
+- `RTSP_MJPEG_Q` is now a legacy compatibility env var and is ignored; the persistent transport no longer uses MJPEG internally
+- RTSP publishing now keeps one long-lived ffmpeg RTSP publisher per camera; clip changes only swap the short-lived clip feeders feeding that publisher, so MediaMTX readers stay connected when a clip ends or a newer clip arrives
+- Each camera now has an explicit queue/state machine: existing files at startup seed only the newest clip, each newly discovered newer clip is queued once, played once, and then the stream enters still+silence hold until another newer clip arrives
+- Hold mode audio is zero-valued PCM silence before AAC encoding, so the RTSP hold state is intentionally silent rather than replaying trailing clip audio
+- The publisher no longer depends on handing multiple MPEG-TS producers across one pipe, and it no longer uses a lossy MJPEG intermediate; it now ingests rawvideo yuv420p + PCM audio continuously, which avoids MPEG-TS DTS/PPS boundary corruption while materially reducing unnecessary re-encode loss inside the persistent pipeline
+- Tradeoff: because the persistent rawvideo publisher must keep a stable geometry, the first successful clip for a camera locks that camera's canvas size for the process lifetime; later clips with different dimensions are scaled/padded into that same canvas instead of restarting the publisher and dropping RTSP readers
+- Clip ordering is based on timestamps parsed from Blink filenames (not filesystem mtime), which avoids bouncing backward to older clips after prune/copy operations
 - The bridge now waits briefly for local MP4 paths to stabilize, retries alternate local candidates, and falls back to `mediaUrl` when available if a `localFile` disappears mid-handoff
 - On Unraid, RTSP publishing runs inside `birdwatch` (set `ENABLE_RTSP_PUBLISHER=1`) and publishes to MediaMTX
 - `BLINK_FETCH_IGNORE_SEEN=1` and `BLINK_FETCH_NO_SAVE_STATE=1` for one-shot replay testing of recent clips

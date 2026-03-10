@@ -4,21 +4,22 @@
 Design goals
 - Keep one long-lived ffmpeg RTSP publisher process per camera.
 - Avoid reconnecting MediaMTX or downstream RTSP readers when content changes.
-- Play each new clip once with audio, then fall back to the clip's last frame plus silence.
-- Avoid MPEG-TS segment handoff corruption by keeping the RTSP publisher alive and feeding it
-  continuous raw MJPEG frames + PCM audio over local TCP sockets.
+- Play each discovered clip once, in order, then hold on the last frame plus silence.
+- Avoid MPEG-TS producer handoff corruption while also removing the extra lossy MJPEG hop.
 
 How it works
 - Watches a directory for MP4 files that match a pattern (default: *.mp4).
 - Groups files by camera name using RTSP_CAMERA_REGEX.
-- For each camera, starts one persistent ffmpeg publisher with two local TCP inputs:
+- Each camera owns an explicit in-memory playback state machine:
+  IDLE -> PREPARING -> PLAYING -> HOLDING (or ERROR), with a monotonic discovery watermark.
+- Existing files at startup seed each camera with only the newest clip.
+- Newly discovered clips with a strictly newer sort key are queued once and played once.
+- For each camera, one persistent ffmpeg publisher ingests continuous local TCP inputs:
   * audio: mono 48 kHz s16le PCM
-  * video: concatenated MJPEG frames at RTSP_VIDEO_FPS
-- When a new clip appears, short-lived ffmpeg decoders emit raw audio/video to stdout.
-  Python forwards those bytes into the already-connected local sockets.
-- After the clip ends, lightweight Python filler threads keep sending the last JPEG frame and
-  silent PCM until a newer clip arrives.
-- Switching clips only swaps the upstream feeders; the RTSP publisher process stays put.
+  * video: rawvideo yuv420p at RTSP_VIDEO_FPS
+- Short-lived ffmpeg decoders feed clip audio/video into those local sockets.
+- After the clip ends, Python keeps sending the last raw video frame and zero-valued PCM silence
+  until a newer queued clip arrives.
 
 Env
 - WATCH_DIR: directory to scan (default: /watch)
@@ -32,6 +33,8 @@ Env
 - RTSP_STILL_HOLD_SEC: kept for compatibility; 0 means effectively forever. Non-zero values only
   affect log messaging because the new design holds the still indefinitely until replaced.
 - RTSP_VIDEO_FPS: publisher input/output fps for clips + stills (default: 15)
+- RTSP_H264_PRESET / RTSP_H264_CRF: persistent publisher encode settings
+- RTSP_MJPEG_Q: legacy compatibility knob; ignored now that the transport is rawvideo instead of MJPEG
 """
 
 from __future__ import annotations
@@ -47,8 +50,10 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -61,11 +66,56 @@ AUDIO_SAMPLE_RATE = 48_000
 AUDIO_CHANNELS = 1
 PCM_BYTES_PER_SAMPLE = 2
 
+ClipSortKey = tuple[float, str]
+
+
+class CameraLifecycleState(str, Enum):
+    IDLE = "idle"
+    PREPARING = "preparing"
+    PLAYING = "playing"
+    HOLDING = "holding"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, order=True)
+class ClipRef:
+    sort_key: ClipSortKey
+    path: Path = field(compare=False)
+
+    @property
+    def name(self) -> str:
+        return self.path.name
+
+
+@dataclass(frozen=True)
+class VideoGeometry:
+    width: int
+    height: int
+
+    @property
+    def size_arg(self) -> str:
+        return f"{self.width}x{self.height}"
+
+    @property
+    def raw_frame_size(self) -> int:
+        # yuv420p => 1.5 bytes per pixel
+        return (self.width * self.height * 3) // 2
+
 
 @dataclass
 class ClipProbe:
     has_video: bool
     has_audio: bool
+    width: int | None = None
+    height: int | None = None
+
+
+@dataclass
+class PreparedClip:
+    clip: ClipRef
+    probe: ClipProbe
+    geometry: VideoGeometry
+    still_frame: Path
 
 
 @dataclass
@@ -73,6 +123,68 @@ class PumpedProc:
     proc: subprocess.Popen
     stop_event: threading.Event
     threads: list[threading.Thread]
+
+
+@dataclass
+class CameraPlaybackState:
+    lifecycle: CameraLifecycleState = CameraLifecycleState.IDLE
+    pending_clips: deque[ClipRef] = field(default_factory=deque)
+    discovered_highwater: ClipSortKey | None = None
+    preparing_clip: ClipRef | None = None
+    active_clip: ClipRef | None = None
+    held_clip: ClipRef | None = None
+    last_completed_clip: ClipRef | None = None
+
+    def seed_from_existing(self, clips: list[ClipRef]) -> ClipRef | None:
+        if not clips:
+            return None
+        newest = clips[-1]
+        self.pending_clips.clear()
+        self.pending_clips.append(newest)
+        self.discovered_highwater = newest.sort_key
+        self.preparing_clip = None
+        self.active_clip = None
+        self.held_clip = None
+        self.last_completed_clip = None
+        self.lifecycle = CameraLifecycleState.IDLE
+        return newest
+
+    def discover_new_clips(self, clips: list[ClipRef]) -> list[ClipRef]:
+        appended: list[ClipRef] = []
+        highwater = self.discovered_highwater
+        for clip in clips:
+            if highwater is None or clip.sort_key > highwater:
+                self.pending_clips.append(clip)
+                appended.append(clip)
+                highwater = clip.sort_key
+        self.discovered_highwater = highwater
+        return appended
+
+    def begin_prepare(self) -> ClipRef | None:
+        if not self.pending_clips:
+            return None
+        clip = self.pending_clips.popleft()
+        self.preparing_clip = clip
+        return clip
+
+    def mark_playing(self, clip: ClipRef) -> None:
+        self.preparing_clip = None
+        self.active_clip = clip
+        self.held_clip = None
+
+    def mark_holding(self, clip: ClipRef) -> None:
+        self.preparing_clip = None
+        self.active_clip = None
+        self.held_clip = clip
+        self.last_completed_clip = clip
+
+    def mark_idle(self) -> None:
+        self.preparing_clip = None
+        self.active_clip = None
+
+    def mark_error(self) -> None:
+        self.preparing_clip = None
+        self.active_clip = None
 
 
 class StreamSocketServer:
@@ -166,13 +278,14 @@ class CameraStream:
     audio_server: StreamSocketServer
     video_server: StreamSocketServer
     work_dir: Path
-    publisher: subprocess.Popen
+    stop_event: threading.Event
+    publisher: subprocess.Popen | None = None
     thread: threading.Thread | None = None
-    stop_event: threading.Event | None = None
-    current_src: Path | None = None
-    desired_src: Path | None = None
-    last_still: Path | None = None
+    video_geometry: VideoGeometry | None = None
+    last_still_frame: Path | None = None
     last_error: str | None = None
+    playback: CameraPlaybackState = field(default_factory=CameraPlaybackState)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 def slugify(name: str) -> str:
@@ -180,6 +293,55 @@ def slugify(name: str) -> str:
     out = re.sub(r"[^a-z0-9]+", "_", out)
     out = re.sub(r"_+", "_", out).strip("_")
     return out or "camera"
+
+
+def clip_sort_key(path: Path) -> ClipSortKey:
+    return (_parse_name_timestamp(path), path.name)
+
+
+def make_clip_ref(path: Path) -> ClipRef:
+    return ClipRef(sort_key=clip_sort_key(path), path=path)
+
+
+def clip_label(clip: ClipRef | None) -> str:
+    return clip.name if clip is not None else "-"
+
+
+def snapshot_playback(stream: CameraStream) -> tuple[CameraLifecycleState, int, str, str, str]:
+    playback = stream.playback
+    return (
+        playback.lifecycle,
+        len(playback.pending_clips),
+        clip_label(playback.preparing_clip),
+        clip_label(playback.active_clip),
+        clip_label(playback.held_clip),
+    )
+
+
+def transition_state(stream: CameraStream, new_state: CameraLifecycleState, *, reason: str, note: str | None = None) -> None:
+    with stream.lock:
+        prev_state, pending_count, preparing_name, active_name, held_name = snapshot_playback(stream)
+        stream.playback.lifecycle = new_state
+        pending_count = len(stream.playback.pending_clips)
+        preparing_name = clip_label(stream.playback.preparing_clip)
+        active_name = clip_label(stream.playback.active_clip)
+        held_name = clip_label(stream.playback.held_clip)
+        error = stream.last_error
+    parts = [
+        f"cam={stream.camera}",
+        f"state={new_state.value}",
+        f"from={prev_state.value}",
+        f"reason={reason}",
+        f"pending={pending_count}",
+        f"preparing={preparing_name}",
+        f"active={active_name}",
+        f"held={held_name}",
+    ]
+    if note:
+        parts.append(f"note={note}")
+    if error:
+        parts.append(f"error={error}")
+    print("[rtsp-publisher] " + " ".join(parts))
 
 
 def _parse_name_timestamp(path: Path | None) -> float:
@@ -265,13 +427,45 @@ def wait_for_file_ready(path: Path, *, attempts: int = 12, interval_sec: float =
         return False
 
 
+def build_silence_chunk(*, chunk_ms: int = 100) -> bytes:
+    chunk_ms = max(10, chunk_ms)
+    bytes_per_second = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * PCM_BYTES_PER_SAMPLE
+    chunk_size = max(1, (bytes_per_second * chunk_ms) // 1000)
+    return b"\x00" * chunk_size
+
+
+def identify_camera_name(path: Path, cam_re: re.Pattern[str]) -> str | None:
+    m = cam_re.match(path.name)
+    if m:
+        return m.group("camera")
+    if re.match(r"^blink_\d{4}-\d{2}-\d{2}[Tt]\d{2}-\d{2}-\d{2}", path.name, re.IGNORECASE):
+        return "blink"
+    if re.match(r"^download-\d{4}-\d{2}-\d{2}[Tt]\d{2}-\d{2}-\d{2}", path.name, re.IGNORECASE):
+        return "download"
+    return None
+
+
+def collect_clips_by_camera(files: list[Path], cam_re: re.Pattern[str]) -> tuple[dict[str, list[ClipRef]], list[str]]:
+    clips_by_cam: dict[str, list[ClipRef]] = {}
+    skipped: list[str] = []
+    for path in files:
+        cam = identify_camera_name(path, cam_re)
+        if cam is None:
+            skipped.append(path.name)
+            continue
+        clips_by_cam.setdefault(cam, []).append(make_clip_ref(path))
+    for clips in clips_by_cam.values():
+        clips.sort()
+    return clips_by_cam, skipped
+
+
 def probe_clip(src: Path) -> ClipProbe:
     cmd = [
         ffprobe_bin(),
         "-v",
         "error",
         "-show_entries",
-        "stream=codec_type",
+        "stream=codec_type,width,height",
         "-of",
         "json",
         str(src),
@@ -280,17 +474,35 @@ def probe_clip(src: Path) -> ClipProbe:
     payload = json.loads(proc.stdout or "{}")
     has_video = False
     has_audio = False
+    width: int | None = None
+    height: int | None = None
     for stream in payload.get("streams") or []:
         codec_type = (stream or {}).get("codec_type")
-        if codec_type == "video":
+        if codec_type == "video" and not has_video:
             has_video = True
+            width = (stream or {}).get("width")
+            height = (stream or {}).get("height")
         elif codec_type == "audio":
             has_audio = True
-    return ClipProbe(has_video=has_video, has_audio=has_audio)
+    return ClipProbe(has_video=has_video, has_audio=has_audio, width=width, height=height)
 
 
-def run_extract_last_frame(src: Path, out_jpg: Path) -> None:
-    tmp_jpg = out_jpg.with_name(f"{out_jpg.stem}.tmp{out_jpg.suffix or '.jpg'}")
+def video_filter(*, geometry: VideoGeometry, video_fps: int | None = None) -> str:
+    filters: list[str] = []
+    if video_fps is not None:
+        filters.append(f"fps={video_fps}")
+    filters.extend(
+        [
+            f"scale=w={geometry.width}:h={geometry.height}:force_original_aspect_ratio=decrease:flags=lanczos",
+            f"pad={geometry.width}:{geometry.height}:(ow-iw)/2:(oh-ih)/2:color=black",
+            "format=yuv420p",
+        ]
+    )
+    return ",".join(filters)
+
+
+def run_extract_last_frame_raw(src: Path, out_frame: Path, *, geometry: VideoGeometry) -> None:
+    tmp_frame = out_frame.with_name(f"{out_frame.stem}.tmp{out_frame.suffix or '.yuv'}")
     cmd = ffmpeg_base() + [
         "-y",
         "-sseof",
@@ -299,13 +511,29 @@ def run_extract_last_frame(src: Path, out_jpg: Path) -> None:
         str(src),
         "-frames:v",
         "1",
-        str(tmp_jpg),
+        "-vf",
+        video_filter(geometry=geometry),
+        "-pix_fmt",
+        "yuv420p",
+        "-f",
+        "rawvideo",
+        str(tmp_frame),
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    tmp_jpg.replace(out_jpg)
+    tmp_frame.replace(out_frame)
 
 
-def start_publisher(*, audio_url: str, video_url: str, rtsp_url: str, transport: str, video_fps: int, h264_preset: str, h264_crf: str) -> subprocess.Popen:
+def start_publisher(
+    *,
+    audio_url: str,
+    video_url: str,
+    rtsp_url: str,
+    transport: str,
+    video_fps: int,
+    geometry: VideoGeometry,
+    h264_preset: str,
+    h264_crf: str,
+) -> subprocess.Popen:
     gop = max(15, int(video_fps * 2))
     cmd = ffmpeg_base() + [
         "-thread_queue_size",
@@ -318,12 +546,14 @@ def start_publisher(*, audio_url: str, video_url: str, rtsp_url: str, transport:
         str(AUDIO_CHANNELS),
         "-i",
         audio_url,
-        "-fflags",
-        "+genpts+discardcorrupt",
         "-thread_queue_size",
         "512",
         "-f",
-        "mjpeg",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        "-video_size",
+        geometry.size_arg,
         "-framerate",
         str(video_fps),
         "-i",
@@ -420,7 +650,7 @@ def start_clip_audio_feeder(*, src: Path, audio_server: StreamSocketServer) -> P
     return _start_pumped_ffmpeg(cmd, target=audio_server, label=f"audio-{src.name}")
 
 
-def start_clip_video_feeder(*, src: Path, video_server: StreamSocketServer, video_fps: int, mjpeg_q: str) -> PumpedProc:
+def start_clip_video_feeder(*, src: Path, video_server: StreamSocketServer, video_fps: int, geometry: VideoGeometry) -> PumpedProc:
     cmd = ffmpeg_base() + [
         "-y",
         "-re",
@@ -429,11 +659,11 @@ def start_clip_video_feeder(*, src: Path, video_server: StreamSocketServer, vide
         "-map",
         "0:v:0",
         "-vf",
-        f"fps={video_fps},scale=in_range=full:out_range=tv",
-        "-q:v",
-        mjpeg_q,
+        video_filter(geometry=geometry, video_fps=video_fps),
+        "-pix_fmt",
+        "yuv420p",
         "-f",
-        "mjpeg",
+        "rawvideo",
         "pipe:1",
     ]
     return _start_pumped_ffmpeg(cmd, target=video_server, label=f"video-{src.name}")
@@ -462,11 +692,13 @@ def _sleep_until(deadline: float, stop_event: threading.Event) -> None:
         time.sleep(min(remaining, 0.1))
 
 
-def stream_still_frames(still_jpg: Path, video_server: StreamSocketServer, video_fps: int, stop_event: threading.Event) -> None:
+def stream_still_frames(still_frame: Path, *, geometry: VideoGeometry, video_server: StreamSocketServer, video_fps: int, stop_event: threading.Event) -> None:
     try:
-        frame_bytes = still_jpg.read_bytes()
-        if not frame_bytes:
-            raise ValueError(f"empty still frame: {still_jpg}")
+        frame_bytes = still_frame.read_bytes()
+        if len(frame_bytes) != geometry.raw_frame_size:
+            raise ValueError(
+                f"unexpected still size {len(frame_bytes)} != {geometry.raw_frame_size} for {still_frame}"
+            )
         frame_interval = 1.0 / max(1, video_fps)
         next_deadline = time.monotonic()
         while not stop_event.is_set():
@@ -476,15 +708,12 @@ def stream_still_frames(still_jpg: Path, video_server: StreamSocketServer, video
     except BrokenPipeError:
         return
     except Exception as exc:
-        print(f"[rtsp-publisher] still-writer error path={still_jpg}: {exc}")
+        print(f"[rtsp-publisher] still-writer error path={still_frame}: {exc}")
 
 
 def stream_silence(audio_server: StreamSocketServer, stop_event: threading.Event, *, chunk_ms: int = 100) -> None:
-    chunk_ms = max(10, chunk_ms)
-    bytes_per_second = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * PCM_BYTES_PER_SAMPLE
-    chunk_size = max(1, (bytes_per_second * chunk_ms) // 1000)
-    silence = b"\x00" * chunk_size
-    interval = chunk_ms / 1000.0
+    silence = build_silence_chunk(chunk_ms=chunk_ms)
+    interval = max(10, chunk_ms) / 1000.0
     try:
         next_deadline = time.monotonic()
         while not stop_event.is_set():
@@ -515,39 +744,94 @@ def stop_threads(stop_event: threading.Event | None, threads: list[threading.Thr
             thread.join(timeout=2.0)
 
 
+def start_silence_only(stream: CameraStream) -> tuple[threading.Event, list[threading.Thread]]:
+    return start_threads(thread_specs=[(f"rtsp-clip-silence-{stream.camera}", stream_silence, (stream.audio_server,))])
+
+
+def prepare_clip(stream: CameraStream, clip: ClipRef) -> PreparedClip:
+    if not wait_for_file_ready(clip.path):
+        raise FileNotFoundError(clip.path)
+
+    probe = probe_clip(clip.path)
+    if not probe.has_video:
+        raise RuntimeError(f"clip has no video stream: {clip.path}")
+    if not probe.width or not probe.height:
+        raise RuntimeError(f"clip video dimensions unavailable: {clip.path}")
+
+    with stream.lock:
+        geometry = stream.video_geometry or VideoGeometry(width=int(probe.width), height=int(probe.height))
+    still_path = stream.work_dir / "last-frame.yuv"
+    run_extract_last_frame_raw(clip.path, still_path, geometry=geometry)
+    return PreparedClip(clip=clip, probe=probe, geometry=geometry, still_frame=still_path)
+
+
+def ensure_publisher(
+    stream: CameraStream,
+    *,
+    transport: str,
+    video_fps: int,
+    geometry: VideoGeometry,
+    h264_preset: str,
+    h264_crf: str,
+) -> None:
+    with stream.lock:
+        if stream.publisher is not None and stream.publisher.poll() is None:
+            if stream.video_geometry is None:
+                stream.video_geometry = geometry
+            return
+
+    publisher = start_publisher(
+        audio_url=stream.audio_server.url,
+        video_url=stream.video_server.url,
+        rtsp_url=stream.rtsp_url,
+        transport=transport,
+        video_fps=video_fps,
+        geometry=geometry,
+        h264_preset=h264_preset,
+        h264_crf=h264_crf,
+    )
+    with stream.lock:
+        stream.publisher = publisher
+        stream.video_geometry = geometry
+    print(
+        f"[rtsp-publisher] cam={stream.camera} publisher-start transport=rawvideo-yuv420p size={geometry.size_arg} url={stream.rtsp_url}"
+    )
+    if not stream.audio_server.wait_for_connection(timeout_sec=5.0):
+        stop_proc(publisher)
+        raise RuntimeError("publisher failed to connect audio socket")
+    if not stream.video_server.wait_for_connection(timeout_sec=5.0):
+        stop_proc(publisher)
+        raise RuntimeError("publisher failed to connect video socket")
+
+
+# start_threads accepts positional args only, so wrap keyword-heavy helpers.
+def _stream_still_frames_thread(still_frame: Path, stream: CameraStream, video_fps: int, stop_event: threading.Event) -> None:
+    if stream.video_geometry is None:
+        raise ValueError("video geometry is not available")
+    stream_still_frames(
+        still_frame,
+        geometry=stream.video_geometry,
+        video_server=stream.video_server,
+        video_fps=video_fps,
+        stop_event=stop_event,
+    )
+
+
 def start_still_fillers(stream: CameraStream, video_fps: int) -> tuple[threading.Event, list[threading.Thread]]:
-    if stream.last_still is None:
+    if stream.last_still_frame is None:
         raise ValueError("last still frame is not available")
+    if stream.video_geometry is None:
+        raise ValueError("video geometry is not available")
     return start_threads(
         thread_specs=[
             (f"rtsp-silence-{stream.camera}", stream_silence, (stream.audio_server,)),
-            (f"rtsp-still-{stream.camera}", stream_still_frames, (stream.last_still, stream.video_server, video_fps)),
+            (f"rtsp-still-{stream.camera}", _stream_still_frames_thread, (stream.last_still_frame, stream, video_fps)),
         ]
     )
 
 
-def start_silence_only(stream: CameraStream) -> tuple[threading.Event, list[threading.Thread]]:
-    return start_threads(
-        thread_specs=[(f"rtsp-clip-silence-{stream.camera}", stream_silence, (stream.audio_server,))]
-    )
-
-
-def prepare_clip(stream: CameraStream, desired: Path) -> tuple[ClipProbe, Path]:
-    if not wait_for_file_ready(desired):
-        raise FileNotFoundError(desired)
-
-    probe = probe_clip(desired)
-    if not probe.has_video:
-        raise RuntimeError(f"clip has no video stream: {desired}")
-
-    still_path = stream.work_dir / "last.jpg"
-    run_extract_last_frame(desired, still_path)
-    return probe, still_path
-
-
-def camera_worker(stream: CameraStream, video_fps: int, mjpeg_q: str) -> None:
+def camera_worker(stream: CameraStream, *, transport: str, video_fps: int, h264_preset: str, h264_crf: str) -> None:
     stop_event = stream.stop_event
-    assert stop_event is not None
 
     clip_video: PumpedProc | None = None
     clip_audio: PumpedProc | None = None
@@ -556,6 +840,8 @@ def camera_worker(stream: CameraStream, video_fps: int, mjpeg_q: str) -> None:
     clip_expected_audio = False
     filler_stop: threading.Event | None = None
     filler_threads: list[threading.Thread] = []
+    current_clip: ClipRef | None = None
+    preparing_clip: ClipRef | None = None
     last_idle_log: float = 0.0
 
     def stop_clip_state() -> None:
@@ -577,36 +863,81 @@ def camera_worker(stream: CameraStream, video_fps: int, mjpeg_q: str) -> None:
 
     try:
         while not stop_event.is_set():
-            desired = stream.desired_src
+            if preparing_clip is None and clip_video is None:
+                with stream.lock:
+                    preparing_clip = stream.playback.begin_prepare()
+                if preparing_clip is not None:
+                    transition_state(stream, CameraLifecycleState.PREPARING, reason="clip-queued", note=f"clip={preparing_clip.name}")
 
-            if desired is not None and stream.current_src != desired:
+            if preparing_clip is not None and clip_video is None:
                 try:
-                    probe, still_path = prepare_clip(stream, desired)
+                    prepared = prepare_clip(stream, preparing_clip)
+                    ensure_publisher(
+                        stream,
+                        transport=transport,
+                        video_fps=video_fps,
+                        geometry=prepared.geometry,
+                        h264_preset=h264_preset,
+                        h264_crf=h264_crf,
+                    )
                 except FileNotFoundError:
+                    if stop_event.is_set():
+                        break
+                    if not preparing_clip.path.exists():
+                        with stream.lock:
+                            stream.last_error = f"clip vanished before ready: {preparing_clip.name}"
+                            stream.playback.mark_error()
+                        transition_state(stream, CameraLifecycleState.ERROR, reason="prepare-vanished")
+                        preparing_clip = None
+                        time.sleep(0.5)
+                        continue
                     time.sleep(0.5)
                     continue
                 except Exception as exc:
-                    stream.last_error = f"prepare clip failed: {exc}"
-                    print(f"[rtsp-publisher] cam={stream.camera} {stream.last_error}")
+                    with stream.lock:
+                        stream.last_error = f"prepare clip failed: {exc}"
+                        stream.playback.mark_error()
+                    transition_state(stream, CameraLifecycleState.ERROR, reason="prepare-failed")
+                    preparing_clip = None
                     time.sleep(1.0)
                     continue
 
                 stop_clip_state()
                 stop_filler_state()
-                stream.last_still = still_path
-                stream.current_src = desired
-                stream.last_error = None
-                clip_expected_audio = probe.has_audio
-                print(f"[rtsp-publisher] cam={stream.camera} switching src={desired.name}")
-                if probe.has_audio:
-                    print(f"[rtsp-publisher] cam={stream.camera} mode=clip-audio")
-                    clip_audio = start_clip_audio_feeder(src=desired, audio_server=stream.audio_server)
+                with stream.lock:
+                    stream.last_still_frame = prepared.still_frame
+                    stream.video_geometry = prepared.geometry
+                    stream.last_error = None
+                    stream.playback.mark_playing(preparing_clip)
+                source_size = f"{prepared.probe.width}x{prepared.probe.height}"
+                scale_note = ""
+                if source_size != prepared.geometry.size_arg:
+                    scale_note = f" source={source_size}->target={prepared.geometry.size_arg}"
+                transition_state(
+                    stream,
+                    CameraLifecycleState.PLAYING,
+                    reason="clip-start",
+                    note=(
+                        f"clip={preparing_clip.name} audio={'source' if prepared.probe.has_audio else 'zero-pcm-silence'} "
+                        f"video=rawvideo-yuv420p target={prepared.geometry.size_arg}{scale_note}"
+                    ),
+                )
+                current_clip = preparing_clip
+                clip_expected_audio = prepared.probe.has_audio
+                if prepared.probe.has_audio:
+                    clip_audio = start_clip_audio_feeder(src=preparing_clip.path, audio_server=stream.audio_server)
                     time.sleep(0.2)
                 else:
-                    print(f"[rtsp-publisher] cam={stream.camera} mode=clip-no-audio -> silence-fill")
                     clip_aux_stop, clip_aux_threads = start_silence_only(stream)
+                    print(f"[rtsp-publisher] cam={stream.camera} clip={preparing_clip.name} audio-fallback=zero-pcm-silence")
                     time.sleep(0.1)
-                clip_video = start_clip_video_feeder(src=desired, video_server=stream.video_server, video_fps=video_fps, mjpeg_q=mjpeg_q)
+                clip_video = start_clip_video_feeder(
+                    src=preparing_clip.path,
+                    video_server=stream.video_server,
+                    video_fps=video_fps,
+                    geometry=prepared.geometry,
+                )
+                preparing_clip = None
                 continue
 
             if clip_video is not None:
@@ -614,11 +945,16 @@ def camera_worker(stream: CameraStream, video_fps: int, mjpeg_q: str) -> None:
                     audio_rc = clip_audio.proc.poll()
                     if audio_rc is not None:
                         if audio_rc != 0:
-                            print(f"[rtsp-publisher] cam={stream.camera} clip audio feeder exited code={audio_rc}")
+                            print(
+                                f"[rtsp-publisher] cam={stream.camera} clip={clip_label(current_clip)} clip-audio-feeder exited code={audio_rc}"
+                            )
                         stop_pumped_proc(clip_audio)
                         clip_audio = None
                         if not clip_aux_threads and not stop_event.is_set():
                             clip_aux_stop, clip_aux_threads = start_silence_only(stream)
+                            print(
+                                f"[rtsp-publisher] cam={stream.camera} clip={clip_label(current_clip)} audio-transition=zero-pcm-silence"
+                            )
 
                 video_rc = clip_video.proc.poll()
                 if video_rc is None:
@@ -627,37 +963,65 @@ def camera_worker(stream: CameraStream, video_fps: int, mjpeg_q: str) -> None:
 
                 stop_clip_state()
                 if video_rc != 0:
-                    print(f"[rtsp-publisher] cam={stream.camera} clip video feeder exited code={video_rc}")
+                    print(
+                        f"[rtsp-publisher] cam={stream.camera} clip={clip_label(current_clip)} clip-video-feeder exited code={video_rc}"
+                    )
                 if stop_event.is_set():
                     break
-                if stream.desired_src != stream.current_src:
-                    continue
-                if stream.last_still is not None and stream.last_still.exists():
-                    print(f"[rtsp-publisher] cam={stream.camera} mode=still-silence-hold")
+
+                pending_after = 0
+                with stream.lock:
+                    if current_clip is not None:
+                        stream.playback.last_completed_clip = current_clip
+                    pending_after = len(stream.playback.pending_clips)
+
+                if current_clip is not None and stream.last_still_frame is not None and stream.last_still_frame.exists() and pending_after == 0:
                     filler_stop, filler_threads = start_still_fillers(stream, video_fps)
-                    continue
-                time.sleep(0.5)
+                    with stream.lock:
+                        stream.playback.mark_holding(current_clip)
+                    transition_state(
+                        stream,
+                        CameraLifecycleState.HOLDING,
+                        reason="clip-complete",
+                        note=f"clip={current_clip.name} video=still-raw audio=zero-pcm-silence",
+                    )
+                else:
+                    with stream.lock:
+                        if current_clip is not None:
+                            stream.playback.last_completed_clip = current_clip
+                        stream.playback.mark_idle()
+                        stream.playback.held_clip = current_clip if pending_after == 0 else None
+                    transition_state(
+                        stream,
+                        CameraLifecycleState.IDLE,
+                        reason="clip-complete-next-queued" if pending_after > 0 else "clip-complete-no-still",
+                        note=f"clip={clip_label(current_clip)}",
+                    )
+                current_clip = None
                 continue
 
             if filler_threads:
-                if stream.desired_src != stream.current_src:
+                pending_after = 0
+                with stream.lock:
+                    pending_after = len(stream.playback.pending_clips)
+                if pending_after > 0:
                     stop_filler_state()
+                    with stream.lock:
+                        stream.playback.mark_idle()
+                    transition_state(stream, CameraLifecycleState.IDLE, reason="newer-clip-arrived")
                     continue
                 if any(not t.is_alive() for t in filler_threads):
                     stop_filler_state()
-                    if stream.last_still is not None and stream.last_still.exists() and not stop_event.is_set():
+                    if stream.last_still_frame is not None and stream.last_still_frame.exists() and not stop_event.is_set():
                         filler_stop, filler_threads = start_still_fillers(stream, video_fps)
+                        transition_state(stream, CameraLifecycleState.HOLDING, reason="hold-restored", note="video=still-raw audio=zero-pcm-silence")
                     continue
                 time.sleep(0.5)
-                continue
-
-            if stream.current_src is not None and stream.last_still is not None and stream.last_still.exists():
-                filler_stop, filler_threads = start_still_fillers(stream, video_fps)
                 continue
 
             now = time.time()
             if now - last_idle_log >= 30.0:
-                print(f"[rtsp-publisher] cam={stream.camera} idle waiting for first clip")
+                transition_state(stream, CameraLifecycleState.IDLE, reason="waiting-for-clip")
                 last_idle_log = now
             time.sleep(0.5)
     finally:
@@ -666,8 +1030,7 @@ def camera_worker(stream: CameraStream, video_fps: int, mjpeg_q: str) -> None:
 
 
 def teardown_stream(stream: CameraStream) -> None:
-    if stream.stop_event is not None:
-        stream.stop_event.set()
+    stream.stop_event.set()
     stop_proc(stream.publisher)
     stream.audio_server.close()
     stream.video_server.close()
@@ -706,11 +1069,17 @@ def main() -> int:
     mjpeg_q = (os.getenv("RTSP_MJPEG_Q", "2") or "2").strip()
 
     print(f"[rtsp-publisher] camera_regex={cam_re.pattern}")
-    print(f"[rtsp-publisher] video_fps={video_fps} h264_preset={h264_preset} h264_crf={h264_crf} mjpeg_q={mjpeg_q}")
+    print(
+        f"[rtsp-publisher] video_fps={video_fps} h264_preset={h264_preset} h264_crf={h264_crf} "
+        f"video_transport=rawvideo-yuv420p legacy_rtsp_mjpeg_q={mjpeg_q}(ignored)"
+    )
     if hold_int <= 0:
         print("[rtsp-publisher] still hold=continuous until newer clip arrives")
     else:
-        print(f"[rtsp-publisher] still hold compatibility note: RTSP_STILL_HOLD_SEC={hold_int} is ignored; stills now hold until replaced")
+        print(
+            f"[rtsp-publisher] still hold compatibility note: RTSP_STILL_HOLD_SEC={hold_int} is ignored; stills now hold until replaced"
+        )
+    print("[rtsp-publisher] hold-audio=zero-valued pcm_s16le silence")
 
     if not watch_dir.exists():
         print(f"[rtsp-publisher] ERROR watch_dir does not exist: {watch_dir}", file=sys.stderr)
@@ -726,31 +1095,11 @@ def main() -> int:
     try:
         while True:
             files = sorted(watch_dir.glob(glob_pattern))
-            newest_by_cam: dict[str, Path] = {}
-            skipped: list[str] = []
-            newest_key_by_cam: dict[str, float] = {}
+            clips_by_cam, skipped = collect_clips_by_camera(files, cam_re)
 
-            for f in files:
-                m = cam_re.match(f.name)
-                if m:
-                    cam = m.group("camera")
-                else:
-                    if re.match(r"^blink_\d{4}-\d{2}-\d{2}[Tt]\d{2}-\d{2}-\d{2}", f.name, re.IGNORECASE):
-                        cam = "blink"
-                    elif re.match(r"^download-\d{4}-\d{2}-\d{2}[Tt]\d{2}-\d{2}-\d{2}", f.name, re.IGNORECASE):
-                        cam = "download"
-                    else:
-                        skipped.append(f.name)
-                        continue
-                key = _parse_name_timestamp(f)
-                prev_key = newest_key_by_cam.get(cam, float("-inf"))
-                if key > prev_key:
-                    newest_key_by_cam[cam] = key
-                    newest_by_cam[cam] = f
-
-            cam_summary = tuple(sorted((cam, path.name) for cam, path in newest_by_cam.items()))
+            cam_summary = tuple(sorted((cam, clips[-1].name) for cam, clips in clips_by_cam.items() if clips))
             if last_file_count != len(files) or last_cam_summary != cam_summary:
-                print(f"[rtsp-publisher] scan files={len(files)} matched_cams={len(newest_by_cam)}")
+                print(f"[rtsp-publisher] scan files={len(files)} matched_cams={len(clips_by_cam)}")
                 for cam, path_name in cam_summary:
                     print(f"[rtsp-publisher] matched cam={cam} newest={path_name}")
                 last_file_count = len(files)
@@ -763,56 +1112,58 @@ def main() -> int:
                 print(f"[rtsp-publisher] skipped {len(skipped)} file(s): {sample}{extra}")
                 last_skip_report = now
 
-            for cam, newest in newest_by_cam.items():
-                stream_name = slugify(cam)
-                path = f"{stream_prefix}/{stream_name}" if stream_prefix else stream_name
-                rtsp_url = f"rtsp://{mediamtx_host}:{mediamtx_port}/{path}"
+            for cam, clips in clips_by_cam.items():
+                newest = clips[-1]
+                stream_path = f"{stream_prefix}/{slugify(cam)}" if stream_prefix else slugify(cam)
+                rtsp_url = f"rtsp://{mediamtx_host}:{mediamtx_port}/{stream_path}"
                 existing = streams.get(cam)
                 if existing is None:
-                    cam_dir = work_root / stream_name
+                    cam_dir = work_root / slugify(cam)
                     cam_dir.mkdir(parents=True, exist_ok=True)
-                    audio_server = StreamSocketServer(f"{stream_name}-audio")
-                    video_server = StreamSocketServer(f"{stream_name}-video")
-                    publisher = start_publisher(
-                        audio_url=audio_server.url,
-                        video_url=video_server.url,
-                        rtsp_url=rtsp_url,
-                        transport=transport,
-                        video_fps=video_fps,
-                        h264_preset=h264_preset,
-                        h264_crf=h264_crf,
-                    )
-                    stop_event = threading.Event()
+                    audio_server = StreamSocketServer(f"{cam}-audio")
+                    video_server = StreamSocketServer(f"{cam}-video")
                     stream = CameraStream(
                         camera=cam,
-                        stream_name=path,
+                        stream_name=stream_path,
                         rtsp_url=rtsp_url,
                         audio_server=audio_server,
                         video_server=video_server,
                         work_dir=cam_dir,
-                        publisher=publisher,
-                        stop_event=stop_event,
+                        stop_event=threading.Event(),
                     )
-                    stream.desired_src = newest
-                    thread = threading.Thread(target=camera_worker, args=(stream, video_fps, mjpeg_q), daemon=True)
+                    with stream.lock:
+                        seed = stream.playback.seed_from_existing(clips)
+                    thread = threading.Thread(
+                        target=camera_worker,
+                        args=(stream,),
+                        kwargs={
+                            "transport": transport,
+                            "video_fps": video_fps,
+                            "h264_preset": h264_preset,
+                            "h264_crf": h264_crf,
+                        },
+                        daemon=True,
+                    )
                     stream.thread = thread
                     thread.start()
                     streams[cam] = stream
-                    print(f"[rtsp-publisher] starting cam={cam} src={newest.name}")
+                    print(f"[rtsp-publisher] starting cam={cam} seed_clip={seed.name if seed else '-'}")
                     print(f"[rtsp-publisher] cam={cam} url={rtsp_url}")
-                else:
-                    if not newest.exists():
-                        continue
-                    current_key = _parse_name_timestamp(existing.desired_src)
-                    new_key = _parse_name_timestamp(newest)
-                    if new_key >= current_key and existing.desired_src != newest:
-                        existing.desired_src = newest
-                        print(f"[rtsp-publisher] queued cam={cam} src={newest.name}")
+                    continue
+
+                with existing.lock:
+                    discovered = existing.playback.discover_new_clips(clips)
+                if discovered:
+                    queued = ", ".join(clip.name for clip in discovered)
+                    print(
+                        f"[rtsp-publisher] cam={cam} queued_new_clips={len(discovered)} newest={newest.name} clips={queued}"
+                    )
 
             for cam in list(streams.keys()):
                 stream = streams[cam]
-                if stream.publisher.poll() is not None:
-                    print(f"[rtsp-publisher] cam={cam} publisher exited code={stream.publisher.returncode}")
+                publisher = stream.publisher
+                if publisher is not None and publisher.poll() is not None:
+                    print(f"[rtsp-publisher] cam={cam} publisher exited code={publisher.returncode}")
                     teardown_stream(stream)
                     streams.pop(cam, None)
 

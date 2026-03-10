@@ -25,6 +25,7 @@ if [[ "${ENABLE_RTSP_PUBLISHER:-0}" == "1" ]]; then
   export RTSP_VIDEO_FPS="${RTSP_VIDEO_FPS:-15}"
   export RTSP_H264_PRESET="${RTSP_H264_PRESET:-veryfast}"
   export RTSP_H264_CRF="${RTSP_H264_CRF:-23}"
+  # Legacy compatibility knob; current publisher uses rawvideo internally, not MJPEG.
   export RTSP_MJPEG_Q="${RTSP_MJPEG_Q:-2}"
   # Force a known-good regex here. The container-start env for RTSP_CAMERA_REGEX has proven
   # vulnerable to mangling in some deployments even when later interactive shells look clean.
