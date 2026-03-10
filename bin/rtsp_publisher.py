@@ -37,8 +37,9 @@ Env
 - STREAM_PREFIX: optional prefix for paths (default: "")
 
 Notes
-- This is intentionally simple: loop latest clip. No still-frame concat pipeline.
-  It should be good enough for BirdNET-Go to connect to a stable RTSP URL.
+- This is intentionally simple: play the newest clip once, then hold on its last frame
+  until a newer clip arrives. That avoids replaying clip audio forever while keeping a
+  stable RTSP URL available.
 """
 
 from __future__ import annotations
@@ -72,27 +73,32 @@ class StreamProc:
 
 
 def start_ffmpeg(*, src: Path, rtsp_url: str, transport: str) -> subprocess.Popen:
-    # Loop the file forever. -re to simulate realtime.
-    # Transcode audio to AAC for compatibility; copy video if possible.
+    # Play the clip once, then hold on the final video frame for a long time instead of
+    # replaying the MP4 (and its audio) forever. When a newer clip appears, the publisher
+    # restarts ffmpeg on that file.
     ffmpeg_bin = os.getenv("FFMPEG_BIN", "ffmpeg")
+    hold_seconds = os.getenv("RTSP_STILL_HOLD_SEC", "86400") or "86400"
     cmd = [
         ffmpeg_bin,
         "-hide_banner",
         "-loglevel",
         "warning",
-        "-stream_loop",
-        "-1",
         "-re",
         "-i",
         str(src),
+        "-map",
+        "0:v:0",
+        "-vf",
+        f"tpad=stop_mode=clone:stop_duration={hold_seconds}",
         "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-ar",
-        "48000",
-        "-ac",
-        "1",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-tune",
+        "zerolatency",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
         "-f",
         "rtsp",
         "-rtsp_transport",
