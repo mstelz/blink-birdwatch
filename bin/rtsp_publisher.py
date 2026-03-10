@@ -796,10 +796,14 @@ def ensure_publisher(
     print(
         f"[rtsp-publisher] cam={stream.camera} publisher-start transport=rawvideo-yuv420p size={geometry.size_arg} url={stream.rtsp_url}"
     )
-    if not stream.audio_server.wait_for_connection(timeout_sec=5.0):
+    # Rawvideo inputs can take a moment longer to initialize than PCM. Wait a bit longer and
+    # re-check the publisher process before declaring startup failure.
+    if not stream.audio_server.wait_for_connection(timeout_sec=10.0):
         stop_proc(publisher)
         raise RuntimeError("publisher failed to connect audio socket")
-    if not stream.video_server.wait_for_connection(timeout_sec=5.0):
+    if not stream.video_server.wait_for_connection(timeout_sec=15.0):
+        if publisher.poll() is not None:
+            raise RuntimeError(f"publisher exited during video socket connect (code={publisher.returncode})")
         stop_proc(publisher)
         raise RuntimeError("publisher failed to connect video socket")
 
