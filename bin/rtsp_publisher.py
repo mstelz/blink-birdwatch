@@ -79,6 +79,12 @@ class CameraLifecycleState(str, Enum):
 
 @dataclass(frozen=True, order=True)
 class ClipRef:
+    """A discovered MP4 plus its monotonic ordering key.
+
+    ``sort_key`` is intentionally separated from filesystem mtime so queue ordering is
+    stable even if files are copied, restored, or touched after download.
+    """
+
     sort_key: ClipSortKey
     path: Path = field(compare=False)
 
@@ -89,6 +95,8 @@ class ClipRef:
 
 @dataclass(frozen=True)
 class VideoGeometry:
+    """The fixed canvas size used by the persistent publisher for one camera."""
+
     width: int
     height: int
 
@@ -127,6 +135,13 @@ class PumpedProc:
 
 @dataclass
 class CameraPlaybackState:
+    """Minimal state machine for a single camera stream.
+
+    The important invariant is that ``discovered_highwater`` only moves forward.
+    That allows the scanner to re-list the whole watch directory every poll without
+    replaying older clips after prune/copy churn.
+    """
+
     lifecycle: CameraLifecycleState = CameraLifecycleState.IDLE
     pending_clips: deque[ClipRef] = field(default_factory=deque)
     discovered_highwater: ClipSortKey | None = None
@@ -460,6 +475,8 @@ def collect_clips_by_camera(files: list[Path], cam_re: re.Pattern[str]) -> tuple
 
 
 def probe_clip(src: Path) -> ClipProbe:
+    """Read just enough stream metadata to decide how to feed the publisher."""
+
     cmd = [
         ffprobe_bin(),
         "-v",
@@ -488,6 +505,12 @@ def probe_clip(src: Path) -> ClipProbe:
 
 
 def video_filter(*, geometry: VideoGeometry, video_fps: int | None = None) -> str:
+    """Build a deterministic ffmpeg filter graph for clip and still normalization.
+
+    Every clip is scaled into the camera's fixed canvas so the long-lived publisher can
+    stay connected while sources change size or aspect ratio.
+    """
+
     filters: list[str] = []
     if video_fps is not None:
         filters.append(f"fps={video_fps}")
@@ -502,6 +525,12 @@ def video_filter(*, geometry: VideoGeometry, video_fps: int | None = None) -> st
 
 
 def run_extract_last_frame_raw(src: Path, out_frame: Path, *, geometry: VideoGeometry) -> None:
+    """Extract one normalized raw frame near clip end for HOLDING mode.
+
+    The output is raw ``yuv420p`` rather than PNG/JPEG because the filler thread writes
+    the bytes directly into the publisher's rawvideo socket at a fixed cadence.
+    """
+
     tmp_frame = out_frame.with_name(f"{out_frame.stem}.tmp{out_frame.suffix or '.yuv'}")
     cmd = ffmpeg_base() + [
         "-y",
@@ -737,6 +766,12 @@ def _sleep_until(deadline: float, stop_event: threading.Event) -> None:
 
 
 def stream_still_frames(still_frame: Path, *, geometry: VideoGeometry, video_server: StreamSocketServer, video_fps: int, stop_event: threading.Event) -> None:
+    """Push the last extracted frame repeatedly so RTSP readers stay attached.
+
+    This is the core of HOLDING mode: the persistent publisher continues receiving valid
+    raw frames at the expected FPS even when no active clip is playing.
+    """
+
     try:
         frame_bytes = still_frame.read_bytes()
         if len(frame_bytes) != geometry.raw_frame_size:
@@ -793,6 +828,13 @@ def start_silence_only(stream: CameraStream) -> tuple[threading.Event, list[thre
 
 
 def prepare_clip(stream: CameraStream, clip: ClipRef) -> PreparedClip:
+    """Validate and normalize a queued clip before PLAYING begins.
+
+    Preparation is intentionally front-loaded: probe geometry, verify a video stream is
+    present, and precompute the hold-frame artifact. That keeps the runtime state machine
+    simple once playback transitions from PREPARING to PLAYING.
+    """
+
     if not wait_for_file_ready(clip.path):
         raise FileNotFoundError(clip.path)
 
@@ -818,6 +860,12 @@ def ensure_publisher(
     h264_preset: str,
     h264_crf: str,
 ) -> None:
+    """Start the long-lived ffmpeg publisher once per camera if needed.
+
+    Clip feeders can come and go, but this publisher should remain stable so MediaMTX and
+    downstream readers do not see disconnect/reconnect churn on every clip boundary.
+    """
+
     with stream.lock:
         if stream.publisher is not None and stream.publisher.poll() is None:
             if stream.video_geometry is None:

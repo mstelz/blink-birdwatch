@@ -26,6 +26,17 @@ from aiohttp import web
 
 
 class Config:
+    """Environment-backed configuration for the Blink bridge service.
+
+    The bridge has two jobs:
+    1. ingest Blink motion events (webhook-style POSTs or periodic fetch output)
+    2. turn each accepted event into stable local artifacts for downstream consumers
+       such as BirdNET-Go and the RTSP publisher
+
+    Most values are intentionally resolved once at process start so the rest of the
+    module can treat ``cfg`` as immutable runtime configuration.
+    """
+
     port = int(os.getenv("PORT", "8787") or "8787")
     poll_interval_sec = int(os.getenv("POLL_INTERVAL_SEC", "180") or "180")
     blink_poll_interval_sec = int(os.getenv("BLINK_POLL_INTERVAL_SEC", "180") or "180")
@@ -54,6 +65,12 @@ class Config:
     prune_old_mp4 = (os.getenv("PRUNE_OLD_MP4", "") or "").strip().lower() in ("1", "true", "yes", "on")
 
 def _slugify_filename_part(value: str | None, default: str = "camera") -> str:
+    """Convert a camera label into a filename-safe slug.
+
+    Blink camera names can contain spaces and punctuation. The bridge uses a stable,
+    lowercase slug so persisted MP4s from the same camera sort and group predictably.
+    """
+
     txt = (value or "").strip().lower()
     txt = re.sub(r"[^a-z0-9]+", "-", txt)
     txt = re.sub(r"-+", "-", txt).strip("-")
@@ -61,6 +78,13 @@ def _slugify_filename_part(value: str | None, default: str = "camera") -> str:
 
 
 def _camera_slug_from_filename(path: Path) -> str | None:
+    """Best-effort camera extraction from a persisted Blink MP4 filename.
+
+    This is used by pruning logic so we only delete older files for the same camera.
+    If the filename does not follow the expected Blink-derived pattern, callers fall
+    back to safer behavior instead of guessing.
+    """
+
     name = path.name
     m = re.match(r"^(?P<camera>.+?)-\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-\d{2}(?:-\d{1,6})?(?:[+-]\d{2}-\d{2})?\.mp4$", name, re.IGNORECASE)
     if not m:
@@ -69,6 +93,19 @@ def _camera_slug_from_filename(path: Path) -> str | None:
 
 
 class BridgeService:
+    """Owns bridge state, event dedupe, and media processing.
+
+    High-level lifecycle for one motion event:
+    - reject duplicates / already-processing IDs
+    - resolve local MP4 or download from Blink
+    - optionally persist the MP4 for RTSP publishing and debugging
+    - optionally extract a BirdNET-Go WAV
+    - mark the motion ID as processed only after successful completion
+
+    The bridge deliberately keeps the dedupe state separate from media persistence so a
+    failed download or conversion does not poison the event forever.
+    """
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.lock = asyncio.Lock()
@@ -134,6 +171,13 @@ class BridgeService:
         return dt.isoformat().replace(":", "-").replace(".", "-")
 
     def _candidate_local_paths(self, local_file: str) -> list[Path]:
+        """Return plausible locations for a bridge-provided local MP4.
+
+        Some upstream emitters hand us an absolute path, while others emit only a
+        basename that should be interpreted relative to the download/persist dirs.
+        We try a small ordered set of candidates and dedupe them after resolution.
+        """
+
         raw = Path(local_file).expanduser()
         candidates: list[Path] = []
         seen: set[str] = set()
@@ -146,6 +190,14 @@ class BridgeService:
         return candidates
 
     async def _copy_local_file(self, local_file: str, out: Path) -> Path:
+        """Copy a local MP4 only after it looks stable on disk.
+
+        Blink downloads and sidecar tooling can expose a filename slightly before the
+        file is fully written. This helper waits for repeated identical stat results
+        before copying, which dramatically reduces partially-copied clips and RTSP
+        publisher races.
+        """
+
         last_exc: Exception | None = None
         previous: dict[Path, tuple[int, int] | None] = {}
         stable_hits: dict[Path, int] = {}
@@ -190,6 +242,17 @@ class BridgeService:
         raise last_exc or FileNotFoundError(local_file)
 
     async def process_event(self, event: dict[str, Any]) -> tuple[bool, str | None]:
+        """Process one normalized Blink event payload.
+
+        Expected event keys are intentionally loose because events can come from the
+        HTTP endpoint or from ``blink_fetch.py`` output. In practice the important
+        fields are:
+        - ``id``: stable dedupe key
+        - ``timestamp``: used in artifact naming
+        - ``mediaUrl`` and/or ``localFile``: where the MP4 can be obtained
+        - ``camera``: optional, but strongly preferred for prettier persisted names
+        """
+
         event_id = event.get("id")
         if not isinstance(event_id, str) or not event_id:
             return False, "id is required"
@@ -237,7 +300,9 @@ class BridgeService:
                 self.dlog(f"download mediaUrl={media_url} -> {mp4_path}")
                 await self._download_file(str(media_url), mp4_path)
 
-            # Optionally persist the MP4 for RTSP publishing / debugging.
+            # Persisting MP4s serves two downstream use cases:
+            # 1) RTSP publishing needs stable, replayable clip files in a watched directory.
+            # 2) debugging is much easier when the exact source clip is still available.
             if self.cfg.persist_mp4:
                 try:
                     self.cfg.persist_mp4_dir.mkdir(parents=True, exist_ok=True)
