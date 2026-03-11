@@ -262,12 +262,3 @@ docker compose -f docker-compose.unraid.yml up -d --build
 ```
 
 ---
-
-## Repo cleanup direction
-
-This repo has grown from a single-purpose bridge into a bridge + RTSP publishing system. If you keep refactoring it, the best next structural improvements are:
-
-- split RTSP publisher helpers into smaller modules
-- add a dedicated environment-variable reference doc
-- add a troubleshooting/operations doc with common log patterns
-- tighten tests around clip discovery, hold-frame generation, and file-stability races
