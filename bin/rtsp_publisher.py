@@ -445,8 +445,22 @@ def wait_for_file_ready(path: Path, *, attempts: int = 12, interval_sec: float =
 def build_silence_chunk(*, chunk_ms: int = 100) -> bytes:
     chunk_ms = max(10, chunk_ms)
     bytes_per_second = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * PCM_BYTES_PER_SAMPLE
-    chunk_size = max(1, (bytes_per_second * chunk_ms) // 1000)
-    return b"\x00" * chunk_size
+    num_samples = (AUDIO_SAMPLE_RATE * chunk_ms) // 1000
+    if num_samples <= 0:
+        return b""
+
+    # Use a tiny bit of low-level dither/noise instead of pure zeros.
+    # This helps keep downstream analyzers (like BirdNET-Go) "attached" to the audio device.
+    # We use a very small amplitude (1-3 out of 32767) so it is virtually inaudible.
+    import random
+
+    samples = []
+    for _ in range(num_samples):
+        # s16le dither: -2, -1, 0, 1, or 2
+        val = random.randint(-2, 2)
+        samples.append(val.to_bytes(2, byteorder="little", signed=True))
+
+    return b"".join(samples)
 
 
 def identify_camera_name(path: Path, cam_re: re.Pattern[str]) -> str | None:
